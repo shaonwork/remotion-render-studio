@@ -1,3 +1,15 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/branding/remotion-logo-on-dark.svg">
+    <img alt="Remotion" src="docs/branding/remotion-logo-on-light.svg" height="56">
+  </picture>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/branding/hyperframes-logo-dark.svg">
+    <img alt="HyperFrames by HeyGen" src="docs/branding/hyperframes-logo-light.svg" height="56">
+  </picture>
+</p>
+
 # Render Studio
 
 **An offline, in-browser render studio for Remotion and HyperFrames projects — one single HTML file. No server, no install, nothing to sign up for: open the file, drop a project ZIP, and render finished videos right in your browser.**
@@ -14,7 +26,7 @@
 
 *The studio on a real project: a 1080×1920 Remotion composition previewed live, with the render panel and the auto-detected System card (CPU cores, RAM, GPU) beside it.*
 
-**Live version:** https://remotionstudio-phi.vercel.app — or run the exact same studio offline from [`single/Render-Studio.html`](single/Render-Studio.html).
+**Live version:** https://remotionstudio24.vercel.app — or run the exact same studio offline from [`single/Render-Studio.html`](single/Render-Studio.html).
 
 ---
 
@@ -67,7 +79,7 @@ Projects and renders are stored in the browser's own IndexedDB. **Your files nev
 
 ## How to use
 
-1. Get the studio: [`single/Render-Studio.html`](single/Render-Studio.html) from this repo (or open the [live version](https://remotionstudio-phi.vercel.app)).
+1. Get the studio: [`single/Render-Studio.html`](single/Render-Studio.html) from this repo (or open the [live version](https://remotionstudio24.vercel.app)).
 2. Open it in **desktop Chrome or Edge** — double-clicking the file works; it runs from `file://` with no server and no internet.
 3. Drop a project ZIP anywhere in the window (or click *New project*). The type is detected automatically.
 4. Pick a composition, leave the standard settings as they are, and press **Start render**. Finished videos land in your chosen folder and/or the library.
