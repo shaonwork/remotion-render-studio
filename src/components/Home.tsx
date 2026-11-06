@@ -30,9 +30,33 @@ const PCard = ({ p, count, last, onOpen, onDelete }: { p: ProjectRec; count: num
     </div>
   );
 };
-export const Home = ({ projects, renders, onFiles, onFolder, busy, onOpen, onDeleteProject, onDeleteRender }: { projects: ProjectRec[]; renders: RenderRec[]; onFiles: (f: File[]) => void; onFolder: () => void; busy: string; onOpen: (id: string) => void; onDeleteProject: (id: string) => void; onDeleteRender: (id: string) => void }) => (
+/* Library bar: how much this browser is holding for the studio, and the
+   three library-wide actions — backup, restore, and the full clean. */
+const LibraryBar = ({ used, quota, projects, renders, backupBusy, onBackup, onRestore, onClean }: { used: number; quota: number; projects: number; renders: number; backupBusy: string; onBackup: () => void; onRestore: () => void; onClean: () => void }) => {
+  const pct = quota ? Math.min(100, Math.max(1, Math.round((100 * used) / quota))) : 0;
+  return (
+    <div className="card libbar">
+      <div className="librow">
+        <div className="libinfo">
+          <b>Library &amp; cache</b>
+          <div className="meter" style={{ margin: "9px 0 7px" }}><div style={{ width: pct + "%" }} /></div>
+          <small className="mt">{quota ? <>{fmtB(used)} of ~{fmtB(quota)} used</> : <>{fmtB(used)} stored in this browser</>} · {projects} project{projects === 1 ? "" : "s"} · {renders} render{renders === 1 ? "" : "s"}</small>
+        </div>
+        <div className="libacts">
+          <button className="btn sm" onClick={onBackup} disabled={!!backupBusy}><Icon d={IC.dl} size={15} /> {backupBusy || "Download backup"}</button>
+          <button className="btn sm" onClick={onRestore}><Icon d={IC.upload} size={15} /> Restore backup…</button>
+          <button className="btn sm danger" onClick={onClean}><Icon d={IC.trash} size={15} /> Clean everything</button>
+        </div>
+      </div>
+      <p className="hint">A backup is one ZIP with every project and render in this library. Restoring adds them back as new copies — nothing is overwritten. “Clean everything” wipes the whole library, settings and caches, so take a backup first if you want to keep anything. Backup ZIPs are recognised automatically — you can also just drop one anywhere in the window.</p>
+    </div>
+  );
+};
+
+export const Home = ({ projects, renders, onFiles, onFolder, busy, onOpen, onDeleteProject, onDeleteRender, usage: use, backupBusy, onBackup, onRestore, onClean }: { projects: ProjectRec[]; renders: RenderRec[]; onFiles: (f: File[]) => void; onFolder: () => void; busy: string; onOpen: (id: string) => void; onDeleteProject: (id: string) => void; onDeleteRender: (id: string) => void; usage: { used: number; quota: number }; backupBusy: string; onBackup: () => void; onRestore: () => void; onClean: () => void }) => (
   <div>
     <DropHero onFiles={onFiles} busy={busy} onFolder={onFolder} />
+    <LibraryBar used={use.used} quota={use.quota} projects={projects.length} renders={renders.length} backupBusy={backupBusy} onBackup={onBackup} onRestore={onRestore} onClean={onClean} />
     {projects.length > 0 && <><div className="sechead"><h2>Projects</h2><span className="badge">{projects.length}</span></div>
       <div className="plist">{projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return <PCard key={p.id} p={p} count={rs.length} last={rs[0]} onOpen={() => onOpen(p.id)} onDelete={() => { void askConfirm({ title: "Delete this project?", message: `Delete “${p.name}” and its ${rs.length} render(s)? The project and everything rendered from it will be removed from this browser.`, confirmLabel: "Delete project", danger: true }).then((ok) => { if (ok) onDeleteProject(p.id); }); }} />; })}</div></>}
     {renders.length > 0 && <><div className="sechead"><h2>Showcase</h2><span className="badge">{renders.length}</span></div><Gallery renders={renders.slice(0, 12)} showProject onDelete={onDeleteRender} /></>}

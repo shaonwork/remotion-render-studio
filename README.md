@@ -22,6 +22,10 @@
 ![Offline](https://img.shields.io/badge/works-offline-34d399)
 ![WebCodecs](https://img.shields.io/badge/rendering-WebCodecs-6d7cff)
 
+![Render Studio — Remotion + HyperFrames, rendered entirely in your browser](docs/screenshots/social-preview.png)
+
+*Render Studio — Remotion + HyperFrames, rendered entirely in your browser.*
+
 ![Render Studio with a vertical Remotion project loaded — live preview, plain-language render settings, and the System panel showing the machine it runs on](docs/screenshots/studio.png)
 
 *The studio on a real project: a 1080×1920 Remotion composition previewed live, with the render panel and the auto-detected System card (CPU cores, RAM, GPU) beside it.*
@@ -55,7 +59,9 @@ Projects and renders are stored in the browser's own IndexedDB. **Your files nev
 ### Remotion studio
 - **Compiles real projects in the browser** (esbuild WebAssembly) — no Node, no local toolchain.
 - **Live preview** with the Remotion Player; the preview always fits the screen, so a 9:16 composition is fully visible without scrolling.
-- **In-browser rendering** via `@remotion/web-renderer` and WebCodecs, with live progress: rendered/encoded frame counts, elapsed time and ETA.
+- **In-browser rendering** via `@remotion/web-renderer` and WebCodecs, with live progress: rendered/encoded frame counts, measured render speed (fps), elapsed time and ETA — plus the machine's core count, the encoding path in use (GPU/hardware vs CPU/software, probed with the real WebCodecs capability APIs), and the tab's memory use where the browser reports it.
+- **One-tap size presets** — YouTube 1920×1080, Shorts/Reels 1080×1920, Square 1080×1080 — that simply set the size controls, alongside the manual ½×–2× scale.
+- **A finish signal**: a short chime (and a system notification, once you allow it) when a render completes.
 - **A settings surface that speaks plainly** — video format (MP4, WebM, MKV, MOV), quality, size (½×–2×), how much to render (full video, quick test, or a frame range), sound on/off — with the technical controls (video/audio codecs validated against what your browser can actually encode, hardware vs software encoding, frame-wait patience for heavy projects, keyframe interval, media cache, transparent background for WebM/MKV, input props) under *Advanced settings*.
 - **Multiple compositions** per project, picked from one list.
 
@@ -76,6 +82,8 @@ Projects and renders are stored in the browser's own IndexedDB. **Your files nev
 - **Save finished videos straight into a folder you choose** (File System Access API): permission is re-checked at save time, success is reported as `Saved to <folder>/<file>`, and if the browser blocks the write you get the file as a download instead, the reason in plain language, and a one-click retry.
 - Optionally **keep a copy in the in-browser library**, with thumbnails, a Showcase gallery, and per-project render history.
 - Ingest by **drag & drop, file picker, paste, or opening a project folder** — with honest, persistent error messages when a file can't be accepted, and why.
+- **Backup & restore**: download the whole library (every project + render) as one ZIP with a manifest, and restore it later — backups are recognised automatically when dropped in, and items come back as new copies, never overwriting.
+- **Storage meter + Clean everything**: the Library shows how much space the library and caches are using, and one clearly-marked button wipes everything the studio stores (projects, renders, settings, saved folder, caches) back to a fresh first-run state.
 
 ## How to use
 

@@ -6,7 +6,8 @@ import { detectMachine, loadPref, recommend } from "../lib/hw";
 import { openZip, type Files } from "../lib/zip";
 import { loadProject, type Loaded } from "../lib/compile";
 import type { CompMeta } from "../lib/host";
-import { defaultSettings, encodable, encodableAudio, makeProjectThumb, makeThumb, outputHasAudio, renderComposition, type Settings } from "../lib/render";
+import { defaultSettings, encodable, encodableAudio, makeProjectThumb, makeThumb, outputHasAudio, probeEncoderMode, renderComposition, type Settings } from "../lib/render";
+import { loadFinishSignal, notifyPermission, requestNotifyPermission, saveFinishSignal, signalRenderFinished } from "../lib/notify";
 import { fmtB, fmtT } from "../lib/util";
 import { Field, Ring, Seg, Switch, Icon, IC } from "./ui";
 import { Gallery } from "./Gallery";
@@ -22,7 +23,7 @@ const downloadBlob = (blob: Blob, name: string) => {
   const u = URL.createObjectURL(blob); const a = document.createElement("a");
   a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
 };
-type Prog = { p: number; rendered: number; encoded: number; eta: number; t0: number };
+type Prog = { p: number; rendered: number; encoded: number; eta: number; t0: number; fps: number; cores: number; mode: string };
 
 /* The preview is sized from the STAGE BOX, not from width alone: a 9:16
    composition gets min(boxW, boxH*W/H) so the whole player — controls
@@ -62,12 +63,20 @@ function ProgressPanel({ pref, frames }: { pref: { current: Prog }; frames: numb
   const [, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 250); return () => clearInterval(t); }, []);
   const p = pref.current;
+  /* Chrome-only API; the row is simply absent where it doesn't exist.
+     There is deliberately NO "CPU %" row: browsers do not expose real
+     CPU usage to pages, so any such number would be invented. Speed,
+     cores and the encoding path are the honest equivalents. */
+  const memMB = (performance as any).memory?.usedJSHeapSize ? Math.round((performance as any).memory.usedJSHeapSize / 1048576) : 0;
   return (
     <div className="prog"><div className="ringrow"><Ring pct={p.p} />
       <div className="stats"><div className="stat"><small>Rendered</small><b>{p.rendered}/{frames}</b></div><div className="stat"><small>Encoded</small><b>{p.encoded}/{frames}</b></div>
-        <div className="stat"><small>Elapsed</small><b>{fmtT(Date.now() - p.t0)}</b></div><div className="stat"><small>Remaining</small><b>{p.eta > 0 ? fmtT(p.eta) : "…"}</b></div></div></div>
+        <div className="stat"><small>Speed</small><b>{p.fps > 0.05 ? p.fps.toFixed(1) + " fps" : "…"}</b></div><div className="stat"><small>Elapsed</small><b>{fmtT(Date.now() - p.t0)}</b></div>
+        <div className="stat"><small>Remaining</small><b>{p.eta > 0 ? fmtT(p.eta) : "…"}</b></div><div className="stat"><small>Processor</small><b>{p.cores ? `${p.cores} cores` : "Not reported"}</b></div>
+        {memMB > 0 && <div className="stat"><small>Memory (this tab)</small><b>{memMB} MB</b></div>}
+        {p.mode && <div className="stat" style={{ gridColumn: "1 / -1" }}><small>Encoding</small><b>{p.mode}</b></div>}</div></div>
       <div className="pbar"><div style={{ width: p.p + "%" }} /></div>
-      <div className="hint"><span className="pulse" />Rendering on this computer — keep this tab open and visible; it uses your CPU/GPU.</div></div>
+      <div className="hint"><span className="pulse" />Rendering on this computer — keep this tab open and visible. Drawing the frames runs on your processor; the encoding row shows how the video itself is compressed.</div></div>
   );
 }
 
@@ -88,7 +97,10 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const [codecs, setCodecs] = useState<string[]>([]);
   const [acodecs, setAcodecs] = useState<string[]>([]);
   const [job, setJob] = useState<Job>({ status: "idle" });
-  const progressRef = useRef<Prog>({ p: 0, rendered: 0, encoded: 0, eta: 0, t0: 0 });
+  const progressRef = useRef<Prog>({ p: 0, rendered: 0, encoded: 0, eta: 0, t0: 0, fps: 0, cores: 0, mode: "" });
+  const [finishSig, setFinishSigState] = useState<boolean>(() => loadFinishSignal());
+  const [, setPermTick] = useState(0);
+  const setFinishSig = (v: boolean) => { saveFinishSignal(v); setFinishSigState(v); if (v) void requestNotifyPermission().then(() => setPermTick((x) => x + 1)); };
   const ac = useRef<AbortController | null>(null);
 
   const refresh = async () => setRenders(await listRenders(id));
@@ -126,12 +138,27 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
     if (!c || !st || st.status !== "ready") return;
     if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // permission prompt must run inside the click gesture
     const ctl = new AbortController(); ac.current = ctl; const t0 = Date.now();
-    progressRef.current = { p: 0, rendered: 0, encoded: 0, eta: 0, t0 };
+    const cores = navigator.hardwareConcurrency || 0;
+    const encMode = await probeEncoderMode(s.codec, Math.round(c.width! * s.scale), Math.round(c.height! * s.scale), s.hw);
+    progressRef.current = { p: 0, rendered: 0, encoded: 0, eta: 0, t0, fps: 0, cores, mode: encMode };
     setPendingSave(null);
     setJob({ status: "running" });
     const expectAudio = !s.muted && st.status === "ready" && Array.from(st.files.keys()).some((k) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(k));
     try {
-      const res = await renderComposition(c, s, ctl.signal, (p) => { progressRef.current = { p: p.progress * 100, rendered: p.rendered, encoded: p.encoded, eta: p.etaMs, t0 }; }, expectAudio);
+      /* Render speed + ETA are MEASURED, not taken on faith: a rolling
+         ~2.5 s window over the renderer's own progress callbacks gives
+         frames-per-second, and the ETA is the frames left ÷ that speed
+         (falling back to the renderer's estimate until the window fills). */
+      const samples: { t: number; r: number }[] = [];
+      const res = await renderComposition(c, s, ctl.signal, (p) => {
+        const now = performance.now();
+        samples.push({ t: now, r: p.rendered });
+        while (samples.length > 2 && now - samples[0].t > 2500) samples.shift();
+        const first = samples[0];
+        const fpsNow = samples.length > 1 && now > first.t ? (p.rendered - first.r) / ((now - first.t) / 1000) : 0;
+        const eta = fpsNow > 0.05 ? ((frames - p.rendered) / fpsNow) * 1000 : p.etaMs;
+        progressRef.current = { p: p.progress * 100, rendered: p.rendered, encoded: p.encoded, eta, t0, fps: fpsNow, cores, mode: encMode };
+      }, expectAudio);
       let warn = res.warnings.join(" ");
       if (expectAudio && !(await outputHasAudio(res.blob))) warn = ("⚠ The finished file has NO audio track, although this project has sound. The browser media engine could not extract the audio — try the WebM format, or render with the downloadable kit / CLI, which handles audio natively. " + warn).trim();
       const thumb = await makeThumb(res.blob), base = (s.filename || c.id).replace(/[^\w.\- ]+/g, "_"), stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
@@ -162,6 +189,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
         folderMsg = (folderMsg || "The folder copy didn't happen.") + " A copy was downloaded instead, so you still have the file.";
       }
       setJob({ status: "done", ms: res.renderMs, size: res.blob.size, where: savedTo || "this browser", warn: warn || undefined, folderMsg });
+      signalRenderFinished(fileName);
       toast(folderMsg ? "Render finished — the folder copy needs attention, see below" : warn ? "Render finished — with a warning, see below" : savedTo ? "Saved to " + savedTo : "Render saved to your library");
     } catch (e: any) {
       if (ctl.signal.aborted) setJob({ status: "cancelled" }); else setJob({ status: "error", err: String(e.message || e) });
@@ -223,6 +251,13 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
               <p className="hint" style={{ margin: "-6px 0 12px" }}>MP4 plays almost everywhere. WebM is smaller; MOV and MKV suit editing tools.</p>
               <div className="row"><Field label="Quality"><Seg value={s.quality} onChange={(v) => up({ quality: v })} options={[["low", "Draft"], ["medium", "Good"], ["high", "High"], ["very-high", "Max"]]} /></Field></div>
               <p className="hint" style={{ margin: "-6px 0 12px" }}>Higher quality looks sharper, but the file gets bigger and the render slower.</p>
+              <div className="row"><Field label="Size presets"><div className="presetrow">
+                {([["YouTube", 1920, 1080], ["Shorts / Reels", 1080, 1920], ["Square", 1080, 1080]] as [string, number, number][]).map(([l, w, h]) => {
+                  const on = Math.round(c.width! * s.scale) === w && Math.round(c.height! * s.scale) === h;
+                  return <button key={l} className={"btn sm" + (on ? " on" : "")} onClick={() => up({ scale: Math.round((w / c.width!) * 10000) / 10000 })}>{l} · {w}×{h}</button>;
+                })}
+              </div></Field></div>
+              <p className="hint" style={{ margin: "-6px 0 12px" }}>One tap — a preset just sets the size controls below. The video keeps its own proportions, so the current output is {Math.round(c.width! * s.scale)}×{Math.round(c.height! * s.scale)}; on a video made at the preset’s shape, it lands exactly on the preset size.</p>
               <div className="row"><Field label="Video size"><Seg value={s.scale} onChange={(v) => up({ scale: v })} options={[[0.5, "Half"], [1, "Full"], [1.5, "1.5×"], [2, "2×"]]} /></Field></div>
               <p className="hint" style={{ margin: "-6px 0 12px" }}>Full size is {c.width}×{c.height} — the size this video was made at. Half size renders much faster, handy for a quick check.</p>
               <div className="row"><Field label="How much to render"><Seg value={s.range} onChange={(v) => up({ range: v })} options={[["full", "Full video"], ["test", "Quick test"], ["custom", "Part only"]]} /></Field></div>
@@ -235,6 +270,10 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
               {outDir && outPerm && outPerm !== "granted" && <p className="hint" style={{ margin: "-6px 0 12px" }}>The browser still needs your OK to write to “{outDir.name}” — it will ask when you press Start render, and finished videos go there automatically once allowed.</p>}
               {outDir && <Switch on={s.keepCopy} onChange={(v) => up({ keepCopy: v })} title="Also keep a copy in the library" sub="Turn off to save browser storage" />}
               <div className="row"><Field label="File name"><input type="text" placeholder={c.id} value={s.filename} onChange={(e) => up({ filename: e.target.value })} /></Field></div>
+              <Switch on={finishSig} onChange={setFinishSig} title="Sound + notification when a render finishes" sub="Plays a short chime in this tab when a render completes. A system notification appears too, once you allow it below." />
+              {finishSig && notifyPermission() === "default" && <div style={{ margin: "2px 0 10px" }}><button className="btn sm" onClick={() => void requestNotifyPermission().then(() => setPermTick((x) => x + 1))}>Allow notifications</button></div>}
+              {finishSig && notifyPermission() === "denied" && <p className="hint" style={{ margin: "-2px 0 12px" }}>Notifications are blocked for this site in the browser settings — the chime will still play.</p>}
+              {finishSig && notifyPermission() === "unsupported" && <p className="hint" style={{ margin: "-2px 0 12px" }}>This browser has no system notifications — the chime will still play.</p>}
 
               <details className="adv"><summary>Advanced settings</summary>
                 <div className="row"><Field label="Video codec"><select value={s.codec} onChange={(e) => up({ codec: e.target.value as any })}>{codecs.length ? codecs.map((x) => <option key={x} value={x}>{x.toUpperCase()}</option>) : <option>—</option>}</select></Field></div>

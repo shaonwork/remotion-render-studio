@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { clearAll, deleteProject, deleteRender, listProjects, listRenders, persist, putProject, uid, usage, type ProjectRec, type RenderRec } from "./lib/db";
+import { deleteProject, deleteRender, listProjects, listRenders, persist, putProject, uid, usage, type ProjectRec, type RenderRec } from "./lib/db";
 import { openAny } from "./lib/zip";
 import { supported } from "./lib/render";
 import { fmtB, isZip, useObjectUrl, useRoute } from "./lib/util";
@@ -13,6 +13,8 @@ import { Gallery } from "./components/Gallery";
 import { Icon, IC, Seg } from "./components/ui";
 import { detectMachineCached, loadPower, savePower, type Machine, type PowerPref } from "./lib/hw";
 import { askConfirm, ConfirmHost } from "./lib/confirm";
+import { cleanEverything } from "./lib/clean";
+import { downloadBackup, readBackupManifest, restoreBackup } from "./lib/backup";
 
 const SideItem = ({ p, on, count, onClick }: { p: ProjectRec; on: boolean; count: number; onClick: () => void }) => {
   const th = useObjectUrl(p.thumb, "p_" + p.id);
@@ -51,6 +53,8 @@ export default function App() {
   const [over, setOver] = useState(false);
   const [msg, setMsg] = useState("");
   const [ingestErr, setIngestErr] = useState("");   // persistent, dismissible — ingest failures must not vanish like a toast
+  const [notice, setNotice] = useState("");         // same treatment for good news that matters (backup restored)
+  const [libBusy, setLibBusy] = useState("");       // backup build in progress
   const [use, setUse] = useState({ used: 0, quota: 0 });
   const [machine, setMachine] = useState<Machine | null>(null);
   const [power, setPowerState] = useState<PowerPref>(() => loadPower());
@@ -74,14 +78,25 @@ export default function App() {
     const problems: string[] = [];
     if (rejected.length) problems.push(`${rejected.map((n) => `“${n}”`).join(", ")} ${rejected.length === 1 ? "isn't" : "aren't"} a project ZIP — the studio opens .zip files of Remotion or HyperFrames projects.`);
     let last = "", added = 0;
+    const restoredNotes: string[] = [];
     for (const f of accepted) {
       try {
+        /* A backup ZIP carries our manifest at its root — restore it
+           instead of trying (and failing) to open it as a project. */
+        const man = await readBackupManifest(f);
+        if (man) {
+          setBusy(`Restoring backup ${f.name}…`);
+          const r = await restoreBackup(f, man);
+          restoredNotes.push(`Backup restored from “${f.name}”: ${r.projects} project${r.projects === 1 ? "" : "s"} and ${r.renders} render${r.renders === 1 ? "" : "s"} added as new copies — nothing was overwritten.`);
+          continue;
+        }
         setBusy(`Reading ${f.name}…`); const { det } = await openAny(f);   // auto-detect: Remotion / HyperFrames / OpenMontage / skills
         const id = uid(); await putProject({ id, name: f.name.replace(/\.zip$/i, ""), size: f.size, created: Date.now(), opened: Date.now(), zip: f, kind: det.kind, detLabel: det.label }); last = id; added++;
       } catch (e: any) { problems.push(`Couldn't open “${f.name}”: ${plainZipError(e)}`); }
     }
     setBusy(""); persist(); await refresh();
     setIngestErr(problems.join(" "));
+    if (restoredNotes.length) setNotice(restoredNotes.join(" "));
     if (last) { toast(added > 1 ? `${added} projects added` : "Project added"); go(`/p/${last}/studio`); }
   }, [go, refresh, toast]);
 
@@ -134,7 +149,14 @@ export default function App() {
   const active = projects.find((p) => p.id === pid);
   const rmProject = async (id: string) => { await deleteProject(id); if (id === pid) go("/"); await refresh(); toast("Project deleted"); };
   const rmRender = async (id: string) => { await deleteRender(id); await refresh(); };
-  const wipe = async () => { if (await askConfirm({ title: "Clear all data?", message: "Delete ALL projects and renders stored in this browser? This cannot be undone.", confirmLabel: "Delete everything", danger: true })) { await clearAll(); go("/"); location.reload(); } };
+  const wipe = async () => { if (await askConfirm({ title: "Clean everything?", message: "This removes EVERYTHING Render Studio keeps in this browser: all projects and renders, your saved settings, the chosen output folder, and every cache. The studio then restarts completely fresh. This cannot be undone — if you want to keep your work, download a backup from the Library first.", confirmLabel: "Clean everything", danger: true })) { await cleanEverything(); location.reload(); } };
+  const doBackup = async () => {
+    if (libBusy) return;
+    setLibBusy("Preparing backup…");
+    try { await downloadBackup(projects, renders); toast("Backup downloaded — one ZIP with every project and render"); }
+    catch (e: any) { setIngestErr(`Couldn't build the backup: ${String(e?.message || e)}`); }
+    setLibBusy(""); await refresh();
+  };
   const pct = use.quota ? Math.max(1, Math.round((100 * use.used) / use.quota)) : 0;
 
   return (
@@ -165,7 +187,7 @@ export default function App() {
         <div className="foot">
           <div className="meter"><div style={{ width: pct + "%" }} /></div>
           <small>{fmtB(use.used)} used in this browser{use.quota ? ` · ${pct}%` : ""}</small>
-          <button className="btn sm danger" onClick={wipe}><Icon d={IC.trash} size={15} /> Clear all data</button>
+          <button className="btn sm danger" onClick={wipe}><Icon d={IC.trash} size={15} /> Clean everything</button>
           <small className="dim">Everything lives in your browser only. Clearing site data deletes it all.</small>
         </div>
       </nav>
@@ -173,7 +195,8 @@ export default function App() {
       <main className="main">
         {!supported() && <div className="banner">Your browser doesn’t support WebCodecs. Please use <b>Chrome</b> or <b>Edge</b> on desktop to render.</div>}
         {ingestErr && <div className="banner errb" role="alert"><span>{ingestErr}</span><button className="btn sm" onClick={() => setIngestErr("")}>Dismiss</button></div>}
-        {route === "/" && <Home projects={projects} renders={renders} onFiles={ingest} onFolder={() => ingestFolder()} busy={busy} onOpen={(id) => go(`/p/${id}/studio`)} onDeleteProject={rmProject} onDeleteRender={rmRender} />}
+        {notice && <div className="banner okb" role="status"><span>{notice}</span><button className="btn sm" onClick={() => setNotice("")}>Dismiss</button></div>}
+        {route === "/" && <Home projects={projects} renders={renders} onFiles={ingest} onFolder={() => ingestFolder()} busy={busy} onOpen={(id) => go(`/p/${id}/studio`)} onDeleteProject={rmProject} onDeleteRender={rmRender} usage={use} backupBusy={libBusy} onBackup={doBackup} onRestore={() => fileRef.current?.click()} onClean={wipe} />}
         {route === "/pc" && <MachinePage toast={toast} />}
         {route === "/showcase" && <div><div className="phead"><div><h1>Showcase</h1><p className="mt">All your finished renders, newest first.</p></div></div>
           {projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return rs.length ? <div key={p.id}><div className="sechead"><h2>{p.name}</h2><span className="badge">{rs.length}</span><button className="btn sm" onClick={() => go(`/p/${p.id}/studio`)}>Open project</button></div><Gallery renders={rs} onDelete={rmRender} /></div> : null; })}

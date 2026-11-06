@@ -11,6 +11,27 @@ export type Settings = {
 export const defaultSettings = (): Settings => ({ container: "mp4", codec: "h264", quality: "high", hw: "no-preference", scale: 1, range: "full", testFrames: 60, from: 0, to: 150, muted: false, props: "{}", filename: "", keepCopy: true, audioCodec: "auto", audioBitrate: "auto", delayRenderMs: 0, keyframeSec: 0, mediaCacheMb: 0, transparent: false });
 
 export const supported = () => typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined";
+
+/* Which encoder path a render will use, stated honestly. WebCodecs never
+   reveals the encoder it actually picked, so this reports (a) what the
+   user's setting asks for and (b) what this machine can do — probed with
+   the real VideoEncoder.isConfigSupported for the exact codec/size:
+   an explicit GPU/CPU choice is checked against the machine, while
+   "Auto" is reported as the browser's choice plus the machine's
+   capability. Nothing here guesses a CPU percentage — browsers do not
+   expose real CPU usage to pages. */
+const ENC_STR: Record<string, string> = { h264: "avc1.640028", h265: "hvc1.1.6.L93.B0", vp9: "vp09.00.10.08", av1: "av01.0.08M.08", vp8: "vp8" };
+export async function probeEncoderMode(codec: string, width: number, height: number, pref: Settings["hw"]): Promise<string> {
+  const hwOk = async (): Promise<boolean> => {
+    try {
+      const cfg: any = { codec: ENC_STR[codec] || codec, width: Math.max(2, Math.round(width / 2) * 2), height: Math.max(2, Math.round(height / 2) * 2), bitrate: 8e6, framerate: 30, hardwareAcceleration: "prefer-hardware" };
+      return !!(await (window as any).VideoEncoder?.isConfigSupported(cfg))?.supported;
+    } catch { return false; }
+  };
+  if (pref === "prefer-software") return "CPU · software encoding";
+  if (pref === "prefer-hardware") return (await hwOk()) ? "GPU · hardware encoding" : "CPU · software (GPU encoding unavailable)";
+  return (await hwOk()) ? "Auto · browser chooses (hardware encoding available)" : "Auto · browser chooses (software encoding)";
+}
 export async function encodable(container: WebRendererContainer, quality?: WebRendererQuality): Promise<WebRendererVideoCodec[]> {
   try { return (await getEncodableVideoCodecs(container, quality ? { videoBitrate: quality } : undefined)) as WebRendererVideoCodec[]; } catch { return []; }
 }
