@@ -12,7 +12,11 @@
 
 # Render Studio
 
-**An offline, in-browser render studio for Remotion and HyperFrames projects — one single HTML file. No server, no install, nothing to sign up for: open the file, drop a project ZIP, and render finished videos right in your browser.**
+**Render Remotion videos right in your browser — no server, no Node.js install, no command line.** Render Studio is a free, offline, single-file web app: open one HTML file, drop in a Remotion project ZIP, preview it live, and export the finished video with WebCodecs. HyperFrames projects are supported too — and nothing you drop in is ever uploaded; everything stays on your machine.
+
+### [▶ Try the live demo](https://remotionstudio24.vercel.app/)
+
+No download needed — or grab the single HTML file from the [latest release](https://github.com/shaonwork/remotion-render-studio/releases) and run it fully offline.
 
 ![Remotion](https://img.shields.io/badge/Remotion-4.0.539-0b84f3)
 ![HyperFrames](https://img.shields.io/badge/HyperFrames-supported-00f5ff)
@@ -26,9 +30,9 @@
 
 *Render Studio — Remotion + HyperFrames, rendered entirely in your browser.*
 
-![Render Studio with a vertical Remotion project loaded — live preview, plain-language render settings, and the System panel showing the machine it runs on](docs/screenshots/studio.png)
+![Render Studio rendering a vertical Remotion video, with the live render details panel showing frames rendered and encoded, render speed, ETA, processor cores and memory](docs/screenshots/rendering-live.png)
 
-*The studio on a real project: a 1080×1920 Remotion composition previewed live, with the render panel and the auto-detected System card (CPU cores, RAM, GPU) beside it.*
+*A render in progress: the live details panel shows rendered/encoded frames, measured render speed (fps), elapsed and remaining time, the machine's processor cores and the tab's memory — while the video encodes with WebCodecs.*
 
 **Live version:** https://remotionstudio24.vercel.app — or run the exact same studio offline from [`single/Render-Studio.html`](single/Render-Studio.html).
 
@@ -50,9 +54,13 @@ Projects and renders are stored in the browser's own IndexedDB. **Your files nev
 
 ## Screenshots
 
-![The Library — drop zone and all your projects in one place](docs/screenshots/library.png)
+![The Library — storage meter, backup and restore buttons, project list and finished renders in the Showcase](docs/screenshots/library.png)
 
-*The Library: drop a project ZIP anywhere in the window, click to browse, or paste — every project you have opened stays here, with its renders.*
+*The Library: the "Library & cache" card shows how much space the library is using, with one-click backup (one ZIP holding every project and render), restore, and "Clean everything". Your projects and finished renders live below it.*
+
+![The "This computer" page — detected operating system, CPU threads, memory, GPU and browser, render power modes, and the video encoder support table](docs/screenshots/this-computer.png)
+
+*"This computer": the studio detects your machine automatically — OS, CPU threads, memory, GPU and browser — lets you choose how much render power to use, and lists which video encoders (H264, H265, VP9, AV1, VP8) your browser supports.*
 
 ## Features
 
@@ -106,7 +114,7 @@ npm run build          # plain Vite build → dist/
 ## Project structure
 
 ```
-render-studio/
+remotion-render-studio/
 ├─ single/                  the deliverable — one self-contained HTML file
 │  ├─ Render-Studio.html
 │  └─ README-OFFLINE.txt
@@ -127,6 +135,27 @@ render-studio/
 - **Remotion licensing:** the studio defaults to `free-license`, which is only for individuals and teams that qualify for Remotion's [Free License](https://remotion.dev/license). Companies enter their license key under *Advanced settings → Remotion license key*.
 - **Supported imports** in uploaded Remotion projects: `remotion`, `react`, `@remotion/{transitions, shapes, paths, noise, layout-utils, media}`, `zod`. The classic `<Audio>` / `<Video>` / `<OffthreadVideo>` components are mapped to `@remotion/media` automatically.
 - **HyperFrames preview:** projects that load their own extra runtime scripts may behave slightly differently in the preview; the generated render kit always produces the exact official render.
+- **Affiliation:** Render Studio is an independent community tool. It is not affiliated with, sponsored, or endorsed by Remotion AG or HeyGen.
+
+## FAQ
+
+**Can I render Remotion videos without a server?**
+Yes — that is the point of this studio. Remotion projects are compiled and rendered entirely in your browser with WebCodecs. There is no render server, no queue, and no upload.
+
+**Do I need Node.js installed?**
+No. There is nothing to install: the studio is one self-contained HTML file, with the compiler (the WebAssembly build of esbuild) inlined. Just open it in desktop Chrome or Edge.
+
+**Does it work offline?**
+Yes. The single-file build runs from `file://` with no internet connection at all. (The hosted live demo needs internet only to load the page the first time.)
+
+**Are my files uploaded anywhere?**
+No. Projects, renders and settings are stored in your browser's own IndexedDB, on your machine. There is no backend: the studio never sends your projects or videos anywhere.
+
+**Remotion or HyperFrames — which projects work?**
+Both. Drop a ZIP and the type is detected automatically. Remotion projects are compiled, previewed and rendered in the browser; HyperFrames projects play in the built-in player and can be exported as a render kit for the official desktop tool. OpenMontage exports and skill packs are recognised too.
+
+**What does it cost, and which license applies?**
+The studio is free and open source under the MIT License. Remotion itself is covered by Remotion's own license (free for individuals and small teams — see the licensing note above); that license applies to Remotion, not to this studio.
 
 ## License
 
