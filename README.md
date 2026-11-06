@@ -107,3 +107,7 @@ render-studio/
 - **Remotion licensing:** the studio defaults to `free-license`, which is only for individuals and teams that qualify for Remotion's [Free License](https://remotion.dev/license). Companies enter their license key under *Advanced settings → Remotion license key*.
 - **Supported imports** in uploaded Remotion projects: `remotion`, `react`, `@remotion/{transitions, shapes, paths, noise, layout-utils, media}`, `zod`. The classic `<Audio>` / `<Video>` / `<OffthreadVideo>` components are mapped to `@remotion/media` automatically.
 - **HyperFrames preview:** projects that load their own extra runtime scripts may behave slightly differently in the preview; the generated render kit always produces the exact official render.
+
+## License
+
+This project is released under the [MIT License](LICENSE).
