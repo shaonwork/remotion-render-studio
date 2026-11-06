@@ -12,8 +12,36 @@ export async function pickDir(id: string, mode: "read" | "readwrite"): Promise<D
 export const saveOutDir = (h: Dir) => setMeta("outDir", h);
 export const loadOutDir = () => getMeta<Dir>("outDir");
 export const clearOutDir = () => delMeta("outDir");
+
+/* ---- write permission, reported honestly ----
+   A directory handle restored from IndexedDB (i.e. chosen in an earlier
+   session) comes back with permission "prompt", not "granted" — and any of
+   these calls can throw (stale handle, folder moved/deleted, no user
+   gesture). Callers must KNOW which state they are in; the old ensureWrite
+   swallowed every exception and returned true, which made the completion
+   code believe a folder write would succeed when it could not. */
+export type WritePerm = "granted" | "prompt" | "denied";
+export async function queryWrite(h: Dir): Promise<WritePerm> {
+  try { return (await (h as any).queryPermission({ mode: "readwrite" })) as WritePerm; }
+  catch { return "denied"; }
+}
+export async function requestWrite(h: Dir): Promise<boolean> {
+  try { return (await (h as any).requestPermission({ mode: "readwrite" })) === "granted"; }
+  catch { return false; }
+}
+/** Ask (if needed) and report truthfully: true only when writing is allowed. */
 export async function ensureWrite(h: Dir): Promise<boolean> {
-  try { const o: any = { mode: "readwrite" }; if ((await (h as any).queryPermission(o)) === "granted") return true; return (await (h as any).requestPermission(o)) === "granted"; } catch { return true; }
+  if ((await queryWrite(h)) === "granted") return true;
+  return requestWrite(h);
+}
+/** The saved folder itself is gone (moved/deleted since it was chosen). */
+export const isStaleDirError = (e: any) => e?.name === "NotFoundError";
+/** Plain-language reason a folder write failed, for the result area. */
+export function folderErrorText(e: any, folder: string): string {
+  if (isStaleDirError(e)) return `The folder “${folder}” can't be found any more — it may have been moved or deleted. Choose it again to keep saving there.`;
+  if (e?.name === "NotAllowedError" || e?.name === "SecurityError") return `The browser blocked writing to “${folder}” — it needs your permission first.`;
+  if (e?.name === "QuotaExceededError") return `“${folder}” doesn't have room for this file.`;
+  return `Couldn't write to “${folder}”: ${e?.message || e}`;
 }
 async function walk(dir: Dir, prefix: string, out: Record<string, Uint8Array>, tick: () => void) {
   for await (const [name, h] of (dir as any).entries() as AsyncIterable<[string, FileSystemHandle]>) {

@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Player } from "@remotion/player";
 import { getProject, listRenders, putProject, putRender, deleteRender, uid, type ProjectRec, type RenderRec } from "../lib/db";
-import { clearOutDir, ensureWrite, fsaSupported, loadOutDir, pickDir, saveOutDir, writeToDir, type Dir } from "../lib/fsa";
+import { clearOutDir, ensureWrite, folderErrorText, fsaSupported, isStaleDirError, loadOutDir, pickDir, queryWrite, saveOutDir, writeToDir, type Dir, type WritePerm } from "../lib/fsa";
 import { detectMachine, loadPref, recommend } from "../lib/hw";
 import { openZip, type Files } from "../lib/zip";
 import { loadProject, type Loaded } from "../lib/compile";
@@ -12,7 +12,16 @@ import { Field, Ring, Seg, Switch, Icon, IC } from "./ui";
 import { Gallery } from "./Gallery";
 
 type St = { status: "loading"; msg: string } | { status: "error"; err: string } | { status: "ready"; loaded: Loaded; files: Files; rec: ProjectRec };
-type Job = { status: "idle" } | { status: "running" } | { status: "done"; ms: number; size: number; where: string; warn?: string } | { status: "error"; err: string } | { status: "cancelled" };
+type Job = { status: "idle" } | { status: "running" } | { status: "done"; ms: number; size: number; where: string; warn?: string; folderMsg?: string } | { status: "error"; err: string } | { status: "cancelled" };
+/* A render whose folder copy is still owed: the blob + its library record,
+   kept so the "Save to folder" button (a fresh user gesture, which is what
+   the browser's permission prompt needs) can finish the job later. */
+type PendingSave = { blob: Blob; fileName: string; rec: RenderRec };
+
+const downloadBlob = (blob: Blob, name: string) => {
+  const u = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
+};
 type Prog = { p: number; rendered: number; encoded: number; eta: number; t0: number };
 
 /* The preview is sized from the STAGE BOX, not from width alone: a 9:16
@@ -68,8 +77,13 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const [comp, setComp] = useState(0);
   const [s, setS] = useState<Settings>(() => { try { const saved = localStorage.getItem("rs_set_" + id); return { ...defaultSettings(), ...(saved ? {} : loadPref() || {}), ...JSON.parse(saved || "{}") }; } catch { return defaultSettings(); } });
   const [outDir, setOutDir] = useState<Dir | null>(null);
-  useEffect(() => { loadOutDir().then((h) => setOutDir(h || null)); }, []);
-  const chooseOut = async () => { try { const h = await pickDir("render-out", "readwrite"); await saveOutDir(h); setOutDir(h); toast("Output folder: " + h.name); } catch {} };
+  const [outPerm, setOutPerm] = useState<WritePerm | null>(null);
+  const [pendingSave, setPendingSave] = useState<PendingSave | null>(null);
+  useEffect(() => { loadOutDir().then((h) => { setOutDir(h || null); if (h) queryWrite(h).then(setOutPerm); }); }, []);
+  const chooseOut = async () => {
+    try { const h = await pickDir("render-out", "readwrite"); await saveOutDir(h); setOutDir(h); setOutPerm("granted"); toast("Output folder: " + h.name); }
+    catch (e: any) { if (e?.name !== "AbortError") toast("Couldn't use that folder: " + (e?.message || e)); }
+  };
   const auto = async () => { const m = await detectMachine(); const r = recommend(m, (() => { try { return JSON.parse(localStorage.getItem("rs_bench") || "null"); } catch { return null; } })() || undefined); up(r.pref); toast("Optimized for this computer"); };
   const [codecs, setCodecs] = useState<string[]>([]);
   const [acodecs, setAcodecs] = useState<string[]>([]);
@@ -110,9 +124,10 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
 
   const start = async () => {
     if (!c || !st || st.status !== "ready") return;
-    let dirOk = false; if (outDir) dirOk = await ensureWrite(outDir);   // must run inside the click gesture
+    if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // permission prompt must run inside the click gesture
     const ctl = new AbortController(); ac.current = ctl; const t0 = Date.now();
     progressRef.current = { p: 0, rendered: 0, encoded: 0, eta: 0, t0 };
+    setPendingSave(null);
     setJob({ status: "running" });
     const expectAudio = !s.muted && st.status === "ready" && Array.from(st.files.keys()).some((k) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(k));
     try {
@@ -120,13 +135,55 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
       let warn = res.warnings.join(" ");
       if (expectAudio && !(await outputHasAudio(res.blob))) warn = ("⚠ The finished file has NO audio track, although this project has sound. The browser media engine could not extract the audio — try the WebM format, or render with the downloadable kit / CLI, which handles audio natively. " + warn).trim();
       const thumb = await makeThumb(res.blob), base = (s.filename || c.id).replace(/[^\w.\- ]+/g, "_"), stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
-      const fileName = `${base}-${stamp}.${s.container}`; let savedTo: string | undefined;
-      if (outDir && dirOk) { try { await writeToDir(outDir, fileName, res.blob); savedTo = `${outDir.name}/${fileName}`; } catch (e: any) { toast("Couldn’t write to the folder: " + e.message); } }
+      const fileName = `${base}-${stamp}.${s.container}`;
+      /* Folder save, told straight. Permission is re-checked NOW, at save
+         time (it can lapse between choosing the folder and a long render
+         finishing). Three honest outcomes: written to the folder; blocked —
+         in which case the file is downloaded instead, the reason stays in
+         the result area, and a button below can retry with a fresh click
+         (the gesture the permission prompt needs); or no folder chosen. */
+      let savedTo: string | undefined; let folderMsg: string | undefined; let folderBlocked = false;
+      if (outDir) {
+        const perm = await queryWrite(outDir); setOutPerm(perm);
+        if (perm === "granted") {
+          try { await writeToDir(outDir, fileName, res.blob); savedTo = `${outDir.name}/${fileName}`; }
+          catch (e: any) { folderBlocked = true; folderMsg = folderErrorText(e, outDir.name); if (isStaleDirError(e)) { await clearOutDir(); setOutDir(null); setOutPerm(null); } }
+        } else {
+          folderBlocked = true;
+          folderMsg = `The folder copy didn't happen — the browser hasn't given permission to write to “${outDir.name}”. Press “Save to folder” below to allow it and put the file there.`;
+        }
+      }
       const rec: RenderRec = { id: uid(), projectId: id, projectName: st.rec.name, comp: c.id, name: fileName, createdAt: Date.now(), renderMs: res.renderMs, size: res.blob.size, mime: res.blob.type,
         container: s.container, codec: s.codec, width: Math.round(c.width! * s.scale), height: Math.round(c.height! * s.scale), fps: c.fps!, frames: res.frames, settings: { ...s }, blob: s.keepCopy || !savedTo ? res.blob : undefined, thumb, savedTo };
-      await putRender(rec); await refresh(); onChanged(); setJob({ status: "done", ms: res.renderMs, size: res.blob.size, where: savedTo || "this browser", warn: warn || undefined }); toast(warn ? "Render finished — with a warning, see below" : savedTo ? "Saved to " + savedTo : "Render saved to your library");
+      await putRender(rec); await refresh(); onChanged();
+      if (folderBlocked) {
+        downloadBlob(res.blob, fileName);   // the file still reaches the user, via Downloads
+        if (outDir) setPendingSave({ blob: res.blob, fileName, rec });
+        folderMsg = (folderMsg || "The folder copy didn't happen.") + " A copy was downloaded instead, so you still have the file.";
+      }
+      setJob({ status: "done", ms: res.renderMs, size: res.blob.size, where: savedTo || "this browser", warn: warn || undefined, folderMsg });
+      toast(folderMsg ? "Render finished — the folder copy needs attention, see below" : warn ? "Render finished — with a warning, see below" : savedTo ? "Saved to " + savedTo : "Render saved to your library");
     } catch (e: any) {
       if (ctl.signal.aborted) setJob({ status: "cancelled" }); else setJob({ status: "error", err: String(e.message || e) });
+    }
+  };
+  /* Retry the owed folder copy. This click IS the user gesture the
+     browser's permission prompt requires, so it can succeed where the
+     automatic post-render attempt (minutes after the last click) could not. */
+  const savePendingToFolder = async () => {
+    if (!pendingSave || !outDir) return;
+    if (!(await ensureWrite(outDir))) { setOutPerm("denied"); toast(`The browser still hasn't given permission to write to “${outDir.name}”. The downloaded copy is yours to keep.`); return; }
+    setOutPerm("granted");
+    try {
+      await writeToDir(outDir, pendingSave.fileName, pendingSave.blob);
+      const savedTo = `${outDir.name}/${pendingSave.fileName}`;
+      await putRender({ ...pendingSave.rec, savedTo }); await refresh(); onChanged();
+      setPendingSave(null);
+      setJob((j) => (j.status === "done" ? { ...j, where: savedTo, folderMsg: undefined } : j));
+      toast("Saved to " + savedTo);
+    } catch (e: any) {
+      if (isStaleDirError(e)) { await clearOutDir(); setOutDir(null); setOutPerm(null); setPendingSave(null); }
+      toast(folderErrorText(e, outDir.name));
     }
   };
   const running = job.status === "running";
@@ -174,7 +231,8 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
               {s.range === "custom" && <><div className="row"><Field label="From frame"><input type="number" min={0} value={s.from} onChange={(e) => up({ from: +e.target.value })} /></Field><Field label="To frame"><input type="number" min={0} value={s.to} onChange={(e) => up({ to: +e.target.value })} /></Field></div>
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>Frame numbers — this video has {c.durationInFrames} frames at {c.fps}fps.</p></>}
               {hasAudio && <Switch on={!s.muted} onChange={(v) => up({ muted: !v })} title="Sound" sub="Keep the voice, music and effects in the finished video. Turn off for a silent video." />}
-              <div className="row"><Field label="Save finished videos to">{fsaSupported() ? <div className="folder"><span className={outDir ? "" : "dim"} title={outDir ? outDir.name : undefined}>{outDir ? outDir.name : "Not set — kept in your library"}</span><button className="btn sm" onClick={chooseOut}>Choose…</button>{outDir && <button className="btn sm" title="Forget folder" onClick={async () => { await clearOutDir(); setOutDir(null); }}>✕</button>}</div> : <p className="hint">Folder saving needs Chrome or Edge.</p>}</Field></div>
+              <div className="row"><Field label="Save finished videos to">{fsaSupported() ? <div className="folder"><span className={outDir ? "" : "dim"} title={outDir ? outDir.name : undefined}>{outDir ? outDir.name : "Not set — kept in your library"}</span><button className="btn sm" onClick={chooseOut}>Choose…</button>{outDir && <button className="btn sm" title="Forget folder" onClick={async () => { await clearOutDir(); setOutDir(null); setOutPerm(null); }}>✕</button>}</div> : <p className="hint">Folder saving needs Chrome or Edge.</p>}</Field></div>
+              {outDir && outPerm && outPerm !== "granted" && <p className="hint" style={{ margin: "-6px 0 12px" }}>The browser still needs your OK to write to “{outDir.name}” — it will ask when you press Start render, and finished videos go there automatically once allowed.</p>}
               {outDir && <Switch on={s.keepCopy} onChange={(v) => up({ keepCopy: v })} title="Also keep a copy in the library" sub="Turn off to save browser storage" />}
               <div className="row"><Field label="File name"><input type="text" placeholder={c.id} value={s.filename} onChange={(e) => up({ filename: e.target.value })} /></Field></div>
 
@@ -201,7 +259,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
             <div className="panelfoot">
               <button className={"btn big " + (running ? "stop" : "primary")} onClick={running ? () => ac.current?.abort() : start}>{running ? "Cancel render" : "Start render"}</button>
               {job.status === "running" && <ProgressPanel pref={progressRef} frames={frames} />}
-              {job.status === "done" && <div className="result"><b>✓ Done in {fmtT(job.ms)}</b><div className="hint" style={{ color: "var(--text)" }}>{fmtB(job.size)} · saved in {job.where}</div>{job.warn && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.warn}</div>}<button className="btn sm" style={{ marginTop: 10 }} onClick={() => setTab("renders")}>Open renders</button></div>}
+              {job.status === "done" && <div className="result"><b>✓ Done in {fmtT(job.ms)}</b><div className="hint" style={{ color: "var(--text)" }}>{fmtB(job.size)} · saved in {job.where}</div>{job.warn && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.warn}</div>}{job.folderMsg && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.folderMsg}</div>}<button className="btn sm" style={{ marginTop: 10 }} onClick={() => setTab("renders")}>Open renders</button>{pendingSave && outDir && <button className="btn sm" style={{ marginTop: 10, marginLeft: 8 }} onClick={savePendingToFolder}>Save to “{outDir.name}”</button>}</div>}
               {job.status === "cancelled" && <div className="result err"><b>Render cancelled</b></div>}
               {job.status === "error" && <div className="result err"><b>Render failed</b><pre>{job.err}</pre></div>}
             </div>

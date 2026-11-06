@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { RenderRec } from "../lib/db";
 import { fmtB, fmtD, fmtT, useObjectUrl } from "../lib/util";
 import { Icon, IC, Modal } from "./ui";
+import { askConfirm } from "../lib/confirm";
 
 const Card = ({ r, showProject, onOpen }: { r: RenderRec; showProject: boolean; onOpen: () => void }) => {
   const th = useObjectUrl(r.thumb, "r_" + r.id);
@@ -32,6 +33,6 @@ export const Gallery = ({ renders, showProject = false, onDelete, empty }: { ren
   if (!renders.length) return <div className="empty">{empty || "No renders yet — your finished videos will show up here."}</div>;
   return (<>
     <div className="gal">{renders.map((r) => <Card key={r.id} r={r} showProject={showProject} onOpen={() => setOpen(r)} />)}</div>
-    {open && <Modal onClose={() => setOpen(null)}><Viewer r={open} onDelete={() => { if (confirm("Delete this render?")) { onDelete(open.id); setOpen(null); } }} /></Modal>}
+    {open && <Modal onClose={() => setOpen(null)}><Viewer r={open} onDelete={() => { void askConfirm({ title: "Delete this render?", message: "This finished video will be removed from your library. This cannot be undone.", confirmLabel: "Delete render", danger: true }).then((ok) => { if (ok) { onDelete(open.id); setOpen(null); } }); }} /></Modal>}
   </>);
 };

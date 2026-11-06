@@ -4,6 +4,7 @@ import { fmtB, fmtD, useObjectUrl } from "../lib/util";
 import { Gallery } from "./Gallery";
 import { Icon, IC } from "./ui";
 import { fsaSupported } from "../lib/fsa";
+import { askConfirm } from "../lib/confirm";
 
 export const DropHero = ({ onFiles, busy, onFolder }: { onFiles: (f: File[]) => void; busy: string; onFolder: () => void }) => {
   const input = useRef<HTMLInputElement>(null);
@@ -33,7 +34,7 @@ export const Home = ({ projects, renders, onFiles, onFolder, busy, onOpen, onDel
   <div>
     <DropHero onFiles={onFiles} busy={busy} onFolder={onFolder} />
     {projects.length > 0 && <><div className="sechead"><h2>Projects</h2><span className="badge">{projects.length}</span></div>
-      <div className="plist">{projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return <PCard key={p.id} p={p} count={rs.length} last={rs[0]} onOpen={() => onOpen(p.id)} onDelete={() => { if (confirm(`Delete “${p.name}” and its ${rs.length} render(s)?`)) onDeleteProject(p.id); }} />; })}</div></>}
+      <div className="plist">{projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return <PCard key={p.id} p={p} count={rs.length} last={rs[0]} onOpen={() => onOpen(p.id)} onDelete={() => { void askConfirm({ title: "Delete this project?", message: `Delete “${p.name}” and its ${rs.length} render(s)? The project and everything rendered from it will be removed from this browser.`, confirmLabel: "Delete project", danger: true }).then((ok) => { if (ok) onDeleteProject(p.id); }); }} />; })}</div></>}
     {renders.length > 0 && <><div className="sechead"><h2>Showcase</h2><span className="badge">{renders.length}</span></div><Gallery renders={renders.slice(0, 12)} showProject onDelete={onDeleteRender} /></>}
   </div>
 );
