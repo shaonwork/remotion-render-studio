@@ -8,6 +8,8 @@ import { loadProject, type Loaded } from "../lib/compile";
 import type { CompMeta } from "../lib/host";
 import { defaultSettings, encodable, encodableAudio, makeProjectThumb, makeThumb, outputDims, outputHasAudio, probeEncoderMode, renderComposition, type Settings } from "../lib/render";
 import { loadFinishSignal, notifyPermission, requestNotifyPermission, saveFinishSignal, signalRenderFinished } from "../lib/notify";
+import { findPublishKit } from "../lib/publishkit";
+import { PublishKitDrawer } from "./PublishKit";
 import { fmtB, fmtT } from "../lib/util";
 import { Field, Ring, Seg, Switch, Icon, IC } from "./ui";
 import { Gallery } from "./Gallery";
@@ -88,6 +90,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const [outDir, setOutDir] = useState<Dir | null>(null);
   const [outPerm, setOutPerm] = useState<WritePerm | null>(null);
   const [pendingSave, setPendingSave] = useState<PendingSave | null>(null);
+  const [kitOpen, setKitOpen] = useState(false);
   useEffect(() => { loadOutDir().then((h) => { setOutDir(h || null); if (h) queryWrite(h).then(setOutPerm); }); }, []);
   const chooseOut = async () => {
     try { const h = await pickDir("render-out", "readwrite"); await saveOutDir(h); setOutDir(h); setOutPerm("granted"); toast("Output folder: " + h.name); }
@@ -117,7 +120,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const refresh = async () => setRenders(await listRenders(id));
   useEffect(() => {
     let dead = false, loaded: Loaded | undefined;
-    setSt({ status: "loading", msg: "Unpacking ZIP…" }); setJob({ status: "idle" }); setComp(0); refresh();
+    setSt({ status: "loading", msg: "Unpacking ZIP…" }); setJob({ status: "idle" }); setComp(0); setKitOpen(false); refresh();
     (async () => {
       try {
         const rec = await getProject(id); if (!rec) throw new Error("Project not found.");
@@ -141,6 +144,9 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   useEffect(() => { encodableAudio(s.container).then((c) => { setAcodecs(c); if (s.audioCodec !== "auto" && !(c as string[]).includes(s.audioCodec)) setS((x) => ({ ...x, audioCodec: "auto" })); }); }, [s.container]);
 
   const loaded = st.status === "ready" ? st.loaded : null, c = loaded?.comps[comp];
+  /* Publish kit: detected from the project's own files (upload-kit/ folder).
+     Null for projects without one — then no button appears at all. */
+  const kit = useMemo(() => (st.status === "ready" ? findPublishKit(st.files) : null), [st]);
   const props = useMemo(() => { try { return { ...(c?.defaultProps || {}), ...JSON.parse(s.props || "{}") }; } catch { return c?.defaultProps || {}; } }, [c, s.props]);
   const frames = !c ? 0 : s.range === "test" ? Math.min(s.testFrames, c.durationInFrames!) : s.range === "custom" ? Math.max(1, Math.min(c.durationInFrames! - 1, s.to) - s.from + 1) : c.durationInFrames!;
   const up = (k: Partial<Settings>) => setS((x) => ({ ...x, ...k }));
@@ -236,7 +242,11 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   return (
     <div className="workview enter">
       <div className="phead"><div><h1 title={st.rec.name}>{st.rec.name}</h1><p className="mt">{st.rec.entry} · {st.files.size} files · {fmtB(bytes)} unpacked</p></div>
-        <div className="tabs">{[["studio", "Studio"], ["renders", `Renders (${renders.length})`], ["files", "Files"]].map(([k, l]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}</div></div>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {kit && <button className="btn" onClick={() => setKitOpen(true)}><Icon d={IC.upload} size={16} /> Publish kit</button>}
+          <div className="tabs" style={{ marginLeft: 0 }}>{[["studio", "Studio"], ["renders", `Renders (${renders.length})`], ["files", "Files"]].map(([k, l]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}</div>
+        </div></div>
+      {kit && kitOpen && <PublishKitDrawer kit={kit} onClose={() => setKitOpen(false)} />}
 
       {tab === "renders" && <div className="workscroll"><Gallery renders={renders} onDelete={async (rid) => { await deleteRender(rid); await refresh(); onChanged(); }} empty="Nothing rendered from this project yet. Head to the Studio tab and press Start render." /></div>}
 
