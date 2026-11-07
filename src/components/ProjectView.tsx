@@ -2,11 +2,11 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import { Player } from "@remotion/player";
 import { getProject, listRenders, putProject, putRender, deleteRender, uid, type ProjectRec, type RenderRec } from "../lib/db";
 import { clearOutDir, ensureWrite, folderErrorText, fsaSupported, isStaleDirError, loadOutDir, pickDir, queryWrite, saveOutDir, writeToDir, type Dir, type WritePerm } from "../lib/fsa";
-import { detectMachine, loadPref, recommend } from "../lib/hw";
+import { detectMachine, detectMachineCached, loadPref, mediaCacheCapMb, mediaCacheLabel, mediaCacheOptions, recommend } from "../lib/hw";
 import { openZip, type Files } from "../lib/zip";
 import { loadProject, type Loaded } from "../lib/compile";
 import type { CompMeta } from "../lib/host";
-import { defaultSettings, encodable, encodableAudio, makeProjectThumb, makeThumb, outputHasAudio, probeEncoderMode, renderComposition, type Settings } from "../lib/render";
+import { defaultSettings, encodable, encodableAudio, makeProjectThumb, makeThumb, outputDims, outputHasAudio, probeEncoderMode, renderComposition, type Settings } from "../lib/render";
 import { loadFinishSignal, notifyPermission, requestNotifyPermission, saveFinishSignal, signalRenderFinished } from "../lib/notify";
 import { fmtB, fmtT } from "../lib/util";
 import { Field, Ring, Seg, Switch, Icon, IC } from "./ui";
@@ -94,6 +94,17 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
     catch (e: any) { if (e?.name !== "AbortError") toast("Couldn't use that folder: " + (e?.message || e)); }
   };
   const auto = async () => { const m = await detectMachine(); const r = recommend(m, (() => { try { return JSON.parse(localStorage.getItem("rs_bench") || "null"); } catch { return null; } })() || undefined); up(r.pref); toast("Optimized for this computer"); };
+  /* RAM for the media-cache ladder: the same browser-reported figure the
+     System card shows ("≥ N GB" — a lower bound, browsers round it down).
+     Once detection lands, a stored cache choice above this machine's cap
+     is clamped down to the cap. */
+  const [ram, setRam] = useState<{ done: boolean; memGB: number | null }>({ done: false, memGB: null });
+  useEffect(() => { let on = true; detectMachineCached().then((m) => { if (on) setRam({ done: true, memGB: m.memGB }); }).catch(() => { if (on) setRam({ done: true, memGB: null }); }); return () => { on = false; }; }, []);
+  const capMb = mediaCacheCapMb(ram.memGB);
+  useEffect(() => { if (ram.done && s.mediaCacheMb > capMb) up({ mediaCacheMb: capMb }); }, [ram.done, capMb]);
+  const cacheOpts = mediaCacheOptions(ram.memGB);
+  if (!cacheOpts.some((o) => o.mb === s.mediaCacheMb)) cacheOpts.push({ mb: s.mediaCacheMb, label: mediaCacheLabel(s.mediaCacheMb) });
+  cacheOpts.sort((a, b) => a.mb - b.mb);
   const [codecs, setCodecs] = useState<string[]>([]);
   const [acodecs, setAcodecs] = useState<string[]>([]);
   const [job, setJob] = useState<Job>({ status: "idle" });
@@ -139,7 +150,8 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
     if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // permission prompt must run inside the click gesture
     const ctl = new AbortController(); ac.current = ctl; const t0 = Date.now();
     const cores = navigator.hardwareConcurrency || 0;
-    const encMode = await probeEncoderMode(s.codec, Math.round(c.width! * s.scale), Math.round(c.height! * s.scale), s.hw);
+    const od = outputDims(c.width!, c.height!, s.scale, s.codec);
+    const encMode = await probeEncoderMode(s.codec, od.width, od.height, s.hw, c.fps || 30, s.quality);
     progressRef.current = { p: 0, rendered: 0, encoded: 0, eta: 0, t0, fps: 0, cores, mode: encMode };
     setPendingSave(null);
     setJob({ status: "running" });
@@ -181,7 +193,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
         }
       }
       const rec: RenderRec = { id: uid(), projectId: id, projectName: st.rec.name, comp: c.id, name: fileName, createdAt: Date.now(), renderMs: res.renderMs, size: res.blob.size, mime: res.blob.type,
-        container: s.container, codec: s.codec, width: Math.round(c.width! * s.scale), height: Math.round(c.height! * s.scale), fps: c.fps!, frames: res.frames, settings: { ...s }, blob: s.keepCopy || !savedTo ? res.blob : undefined, thumb, savedTo };
+        container: s.container, codec: s.codec, width: od.width, height: od.height, fps: c.fps!, frames: res.frames, settings: { ...s }, blob: s.keepCopy || !savedTo ? res.blob : undefined, thumb, savedTo };
       await putRender(rec); await refresh(); onChanged();
       if (folderBlocked) {
         downloadBlob(res.blob, fileName);   // the file still reaches the user, via Downloads
@@ -251,13 +263,6 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
               <p className="hint" style={{ margin: "-6px 0 12px" }}>MP4 plays almost everywhere. WebM is smaller; MOV and MKV suit editing tools.</p>
               <div className="row"><Field label="Quality"><Seg value={s.quality} onChange={(v) => up({ quality: v })} options={[["low", "Draft"], ["medium", "Good"], ["high", "High"], ["very-high", "Max"]]} /></Field></div>
               <p className="hint" style={{ margin: "-6px 0 12px" }}>Higher quality looks sharper, but the file gets bigger and the render slower.</p>
-              <div className="row"><Field label="Size presets"><div className="presetrow">
-                {([["YouTube", 1920, 1080], ["Shorts / Reels", 1080, 1920], ["Square", 1080, 1080]] as [string, number, number][]).map(([l, w, h]) => {
-                  const on = Math.round(c.width! * s.scale) === w && Math.round(c.height! * s.scale) === h;
-                  return <button key={l} className={"btn sm" + (on ? " on" : "")} onClick={() => up({ scale: Math.round((w / c.width!) * 10000) / 10000 })}>{l} · {w}×{h}</button>;
-                })}
-              </div></Field></div>
-              <p className="hint" style={{ margin: "-6px 0 12px" }}>One tap — a preset just sets the size controls below. The video keeps its own proportions, so the current output is {Math.round(c.width! * s.scale)}×{Math.round(c.height! * s.scale)}; on a video made at the preset’s shape, it lands exactly on the preset size.</p>
               <div className="row"><Field label="Video size"><Seg value={s.scale} onChange={(v) => up({ scale: v })} options={[[0.5, "Half"], [1, "Full"], [1.5, "1.5×"], [2, "2×"]]} /></Field></div>
               <p className="hint" style={{ margin: "-6px 0 12px" }}>Full size is {c.width}×{c.height} — the size this video was made at. Half size renders much faster, handy for a quick check.</p>
               <div className="row"><Field label="How much to render"><Seg value={s.range} onChange={(v) => up({ range: v })} options={[["full", "Full video"], ["test", "Quick test"], ["custom", "Part only"]]} /></Field></div>
@@ -280,15 +285,15 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>The compression flavour inside the file. The studio picks a good one for your format — change it only if a player refuses the result.</p>
                 <div className="row"><Field label="Encoder — graphics card or processor"><Seg value={s.hw} onChange={(v) => up({ hw: v })} options={[["no-preference", "Auto"], ["prefer-hardware", "GPU"], ["prefer-software", "CPU"]]} /></Field></div>
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>GPU encoding is faster when your computer supports it. Auto lets the browser decide.</p>
-                <Switch on={s.hw === "prefer-hardware" && s.mediaCacheMb >= 2048} onChange={(v) => up(v ? { hw: "prefer-hardware", mediaCacheMb: 2048 } : { hw: "no-preference", mediaCacheMb: 0 })} title="Turbo mode — full power" sub="GPU-preferred encoding + the largest media cache (2 GB). Drawing the frames themselves is single-threaded in the browser renderer; the core-count choice in the sidebar's System panel applies to HyperFrames kits." />
+                <Switch on={s.hw === "prefer-hardware" && s.mediaCacheMb >= capMb} onChange={(v) => up(v ? { hw: "prefer-hardware", mediaCacheMb: capMb } : { hw: "no-preference", mediaCacheMb: 0 })} title="Turbo mode — full power" sub={`GPU-preferred encoding + the largest media cache for this computer's RAM (${mediaCacheLabel(capMb)} here). Drawing the frames themselves is single-threaded in the browser renderer; the core-count choice in the sidebar's System panel applies to HyperFrames kits.`} />
                 {hasAudio && !s.muted && <><div className="row"><Field label="Sound format"><select value={s.audioCodec} onChange={(e) => up({ audioCodec: e.target.value as any })}><option value="auto">Auto (recommended)</option>{acodecs.map((x) => <option key={x} value={x}>{x.toUpperCase()}</option>)}</select></Field></div>
                   <div className="row"><Field label="Sound quality"><Seg value={s.audioBitrate} onChange={(v) => up({ audioBitrate: v })} options={[["auto", "Auto"], ["low", "Low"], ["medium", "Med"], ["high", "High"], ["very-high", "Max"]]} /></Field></div></>}
                 {(s.container === "webm" || s.container === "mkv") && <Switch on={s.transparent} onChange={(v) => up({ transparent: v })} title="Transparent background" sub="Keep the see-through (alpha) parts of the video — the web renderer supports this only for WebM / MKV with VP8 or VP9." />}
                 <div className="row"><Field label="Patience for slow frames"><Seg value={s.delayRenderMs} onChange={(v) => up({ delayRenderMs: v })} options={[[0, "Normal"], [60000, "1 min"], [120000, "2 min"], [300000, "5 min"], [600000, "10 min"]]} /></Field></div>
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>How long a single frame may wait for videos, fonts and images to load before the render gives up. Heavy projects with lots of stock video sometimes need more time — if a render ever fails with a “delayRender” timeout, raise this.</p>
                 <div className="row"><Field label="Keyframe every (seconds)"><input type="number" min={0} step={0.5} placeholder="Encoder default" value={s.keyframeSec || ""} onChange={(e) => up({ keyframeSec: +e.target.value })} /></Field>
-                  <Field label="Memory kept for videos"><Seg value={s.mediaCacheMb} onChange={(v) => up({ mediaCacheMb: v })} options={[[0, "Default"], [256, "256 MB"], [512, "512 MB"], [1024, "1 GB"], [2048, "2 GB"]]} /></Field></div>
-                <p className="hint" style={{ margin: "-4px 0 10px" }}>A bigger memory cache keeps large videos ready instead of re-reading them for every frame — faster on projects with heavy stock footage.</p>
+                  <Field label="Memory kept for videos"><select value={s.mediaCacheMb} onChange={(e) => up({ mediaCacheMb: +e.target.value })}>{cacheOpts.map((o) => <option key={o.mb} value={o.mb}>{o.label}</option>)}</select></Field></div>
+                <p className="hint" style={{ margin: "-4px 0 10px" }}>{ram.memGB ? <>Highest here is ~70% of the RAM this browser reports (≥ {ram.memGB} GB → {mediaCacheLabel(capMb)}). </> : <>This browser doesn't report how much RAM this computer has, so the choices stop at 2 GB. </>}It's a ceiling, not a reservation — the cache only uses what your project's media actually needs, keeping large videos ready instead of re-reading them for every frame.</p>
                 <Field label="Input props (JSON)"><textarea spellCheck={false} value={s.props} onChange={(e) => up({ props: e.target.value })} /></Field>
                 <p className="hint">Data handed to your composition — only needed if the project was built to accept it.</p>
                 <Field label="Remotion license key"><input type="text" defaultValue={localStorage.getItem("rs_license") || "free-license"} onChange={(e) => localStorage.setItem("rs_license", e.target.value.trim() || "free-license")} /></Field>

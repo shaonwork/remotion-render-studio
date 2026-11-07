@@ -89,3 +89,24 @@ export const powerWorkers = (p: PowerPref, maxCores: number): string => {
   if (p.mode === "custom" && p.cores > 0) return String(maxCores > 0 ? Math.min(p.cores, maxCores) : p.cores);
   return "auto";
 };
+
+/* ---- RAM-aware media cache ----------------------------------------------
+   The media cache (mediaCacheSizeInBytes) is a CEILING, not a reservation:
+   it only ever holds what a project's media actually needs. Its largest
+   sensible value scales with the machine's RAM — ~70% of the figure the
+   browser reports. That figure (navigator.deviceMemory, the same one the
+   System card shows as "≥ N GB") is a lower bound: browsers round it down
+   and cap it, so the ladder is built from the REPORTED number, never from
+   an invented exact total. When the browser reports nothing, the legacy
+   ladder (top 2 GB) is used. Examples: 32 GB reported → 22 GB cap,
+   36 → 25, 16 → 11. */
+export const mediaCacheCapMb = (memGB: number | null): number => {
+  if (!memGB || memGB <= 0) return 2048;
+  return Math.max(1024, Math.floor(memGB * 0.7) * 1024);
+};
+export const mediaCacheLabel = (mb: number): string => (mb <= 0 ? "Default" : mb < 1024 ? `${mb} MB` : `${mb / 1024} GB`);
+export const mediaCacheOptions = (memGB: number | null): { mb: number; label: string }[] => {
+  const cap = mediaCacheCapMb(memGB);
+  const rungs = [256, 512, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 20480].filter((mb) => mb < cap);
+  return [{ mb: 0, label: "Default" }, ...[...rungs, cap].map((mb) => ({ mb, label: mediaCacheLabel(mb) }))];
+};
