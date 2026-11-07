@@ -2,29 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { deleteProject, deleteRender, listProjects, listRenders, persist, putProject, uid, usage, type ProjectRec, type RenderRec } from "./lib/db";
 import { openAny } from "./lib/zip";
 import { supported } from "./lib/render";
-import { fmtB, isZip, useObjectUrl, useRoute } from "./lib/util";
+import { fmtB, isZip, useRoute } from "./lib/util";
 import { Home } from "./components/Home";
-import { MachinePage } from "./components/Machine";
+import { SettingsPage } from "./components/Settings";
+import { Palette, type PalItem } from "./components/Palette";
 import { dirToZip, pickDir } from "./lib/fsa";
 import { ProjectView } from "./components/ProjectView";
 import { HFView } from "./components/HFView";
 import { InfoView } from "./components/InfoView";
 import { Gallery } from "./components/Gallery";
-import { Icon, IC, Seg } from "./components/ui";
-import { detectMachineCached, loadPower, savePower, type Machine, type PowerPref } from "./lib/hw";
+import { Icon, IC } from "./components/ui";
+import { detectMachineCached, type Machine } from "./lib/hw";
 import { askConfirm, ConfirmHost } from "./lib/confirm";
 import { cleanEverything } from "./lib/clean";
 import { downloadBackup, readBackupManifest, restoreBackup } from "./lib/backup";
-
-const SideItem = ({ p, on, count, onClick }: { p: ProjectRec; on: boolean; count: number; onClick: () => void }) => {
-  const th = useObjectUrl(p.thumb, "p_" + p.id);
-  return (
-    <div className={"pi" + (on ? " on" : "")} onClick={onClick}>
-      {th ? <img className="pithumb" src={th} alt="" /> : <Icon d={IC.folder} />}
-      <div className="pit"><b title={p.name}>{p.name}</b><small>{fmtB(p.size)} · {p.detLabel || "Remotion"} · {count} renders</small></div>
-    </div>
-  );
-};
 
 /* A dropped/picked file counts as a ZIP by name or type — or, when a file
    manager stripped the extension, by its content: real ZIPs start with the
@@ -57,12 +48,18 @@ export default function App() {
   const [libBusy, setLibBusy] = useState("");       // backup build in progress
   const [use, setUse] = useState({ used: 0, quota: 0 });
   const [machine, setMachine] = useState<Machine | null>(null);
-  const [power, setPowerState] = useState<PowerPref>(() => loadPower());
+  const [palOpen, setPalOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => { detectMachineCached().then(setMachine); }, []);
-  useEffect(() => { setPowerState(loadPower()); }, [route]);
-  const setPower = (p: PowerPref) => { setPowerState(p); savePower(p); };
+  /* Ctrl+K / Cmd+K toggles the command palette, from anywhere. */
+  useEffect(() => {
+    const f = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setPalOpen((o) => !o); }
+    };
+    window.addEventListener("keydown", f);
+    return () => window.removeEventListener("keydown", f);
+  }, []);
   const toast = useCallback((m: string) => {
     setMsg(m);
     if (toastTimer.current) clearTimeout(toastTimer.current);   // an older toast's timer must not kill a newer message early
@@ -159,6 +156,22 @@ export default function App() {
   };
   const pct = use.quota ? Math.max(1, Math.round((100 * use.used) / use.quota)) : 0;
 
+  /* Command-palette items. The in-project commands are forwarded to the
+     project view as window events — it owns the render state and decides
+     whether each applies (no kit → "Open Publish kit" simply does
+     nothing there). */
+  const palItems: PalItem[] = [
+    { id: "go-lib", title: "Go to Library", hint: "View", run: () => go("/") },
+    { id: "go-show", title: "Go to Showcase", hint: "View", run: () => go("/showcase") },
+    { id: "go-set", title: "Go to Settings", hint: "View", run: () => go("/settings") },
+    ...projects.map((p) => ({ id: "open-" + p.id, title: `Open ${p.name}`, hint: "Project", run: () => go(`/p/${p.id}/studio`) })),
+    ...(pid ? [
+      { id: "cmd-start", title: "Start render", hint: "This project", run: () => window.dispatchEvent(new CustomEvent("rs-cmd", { detail: "start" })) },
+      { id: "cmd-both", title: "Render both platforms", hint: "This project", run: () => window.dispatchEvent(new CustomEvent("rs-cmd", { detail: "both" })) },
+      { id: "cmd-kit", title: "Open Publish kit", hint: "This project", run: () => window.dispatchEvent(new CustomEvent("rs-cmd", { detail: "kit" })) },
+    ] : []),
+  ];
+
   return (
     <div className="shell">
       <nav className="side">
@@ -166,29 +179,20 @@ export default function App() {
         <button className="btn primary wide" onClick={() => fileRef.current?.click()}><Icon d={IC.upload} /> New project</button>
         <input ref={fileRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple hidden
           onChange={(e) => { const fs = e.target.files ? [...e.target.files] : []; e.target.value = ""; if (fs.length) void ingest(fs); }} />
-        <div className="navl"><button className={route === "/" ? "on" : ""} onClick={() => go("/")}><Icon d={IC.grid} /> Library</button><button className={route === "/showcase" ? "on" : ""} onClick={() => go("/showcase")}><Icon d={IC.film} /> Showcase <span className="badge">{renders.length}</span></button><button className={route === "/pc" ? "on" : ""} onClick={() => go("/pc")}><Icon d={IC.box} /> This computer</button></div>
-        <div className="syscard">
-          <div className="syshead"><b>System</b><button className="sysre" title="Re-detect this machine" onClick={() => detectMachineCached(true).then(setMachine)}>↻ Re-detect</button></div>
-          {machine ? <>
-            <div className="sysrow"><span>CPU</span><b>{machine.threads ? `${machine.threads} cores` : "Not reported"}</b></div>
-            <div className="sysrow"><span>RAM</span><b>{machine.memGB ? `≥ ${machine.memGB} GB · approx.` : "Not reported"}</b></div>
-            <div className="sysrow"><span>GPU</span><b title={machine.gpu}>{machine.gpu}</b></div>
-          </> : <div className="sysrow"><span>Detecting this machine…</span></div>}
-          <label className="l" style={{ marginTop: 6 }}>Render power</label>
-          <Seg value={power.mode} onChange={(mode) => setPower({ mode, cores: power.cores || machine?.threads || 0 })} options={[["auto", "Auto"], ["custom", "Cores"], ["full", "Full power"]]} />
-          {power.mode === "custom" && <select value={power.cores || machine?.threads || 1} onChange={(e) => setPower({ mode: "custom", cores: +e.target.value })}>{Array.from({ length: machine?.threads || navigator.hardwareConcurrency || 1 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n} core{n > 1 ? "s" : ""}</option>)}</select>}
-          <small className="sysnote">Cores set the worker count for HyperFrames render kits. The browser Remotion renderer draws frames on one thread, so Full power there means GPU encoding + the largest media cache. GPU info is read-only — no browser API can throttle a GPU.</small>
-          <button className="btn sm" onClick={() => go("/pc")}>Full system details</button>
+        <button className="kbtn" onClick={() => setPalOpen(true)}><Icon d={IC.search} size={15} /> Quick actions <span><kbd>Ctrl</kbd>+<kbd>K</kbd></span></button>
+        {/* Navigation only — machine specs, render power, storage actions
+            and every other control live on the Settings page now. */}
+        <div className="navl">
+          <button className={route === "/" ? "on" : ""} onClick={() => go("/")}><Icon d={IC.grid} /> Library</button>
+          <button className={route === "/showcase" ? "on" : ""} onClick={() => go("/showcase")}><Icon d={IC.film} /> Showcase <span className="badge">{renders.length}</span></button>
+          {pid && active?.hasKit && <button onClick={() => window.dispatchEvent(new CustomEvent("rs-open-kit"))}><Icon d={IC.send} /> Publish kit</button>}
+          <button className={route === "/settings" || route === "/pc" ? "on" : ""} onClick={() => go("/settings")}><Icon d={IC.gear} /> Settings</button>
         </div>
-        <div className="nh">Projects</div>
-        <div className="plistside">{projects.map((p) => (
-          <SideItem key={p.id} p={p} on={p.id === pid} count={renders.filter((r) => r.projectId === p.id).length} onClick={() => go(`/p/${p.id}/studio`)} />))}
-          {!projects.length && <div className="hint" style={{ padding: "6px 10px" }}>Nothing here yet.</div>}</div>
+        <div className="sidespacer" />
         <div className="foot">
+          <div className="sstatus">{machine ? <>Ready{machine.threads ? ` · ${machine.threads} cores` : ""}{machine.memGB ? ` · ≥ ${machine.memGB} GB RAM` : ""}</> : "Detecting this machine…"}</div>
           <div className="meter"><div style={{ width: pct + "%" }} /></div>
           <small>{fmtB(use.used)} used in this browser{use.quota ? ` · ${pct}%` : ""}</small>
-          <button className="btn sm danger" onClick={wipe}><Icon d={IC.trash} size={15} /> Clean everything</button>
-          <small className="dim">Everything lives in your browser only. Clearing site data deletes it all.</small>
         </div>
       </nav>
 
@@ -196,8 +200,8 @@ export default function App() {
         {!supported() && <div className="banner">Your browser doesn’t support WebCodecs. Please use <b>Chrome</b> or <b>Edge</b> on desktop to render.</div>}
         {ingestErr && <div className="banner errb" role="alert"><span>{ingestErr}</span><button className="btn sm" onClick={() => setIngestErr("")}>Dismiss</button></div>}
         {notice && <div className="banner okb" role="status"><span>{notice}</span><button className="btn sm" onClick={() => setNotice("")}>Dismiss</button></div>}
-        {route === "/" && <Home projects={projects} renders={renders} onFiles={ingest} onFolder={() => ingestFolder()} busy={busy} onOpen={(id) => go(`/p/${id}/studio`)} onDeleteProject={rmProject} onDeleteRender={rmRender} usage={use} backupBusy={libBusy} onBackup={doBackup} onRestore={() => fileRef.current?.click()} onClean={wipe} />}
-        {route === "/pc" && <MachinePage toast={toast} />}
+        {route === "/" && <Home projects={projects} renders={renders} onFiles={ingest} onFolder={() => ingestFolder()} busy={busy} onOpen={(id) => go(`/p/${id}/studio`)} onDeleteProject={rmProject} onDeleteRender={rmRender} usage={use} backupBusy={libBusy} onBackup={doBackup} onRestore={() => fileRef.current?.click()} onClean={wipe} onChanged={refresh} />}
+        {(route === "/settings" || route === "/pc") && <SettingsPage toast={toast} usage={use} projects={projects} renders={renders} backupBusy={libBusy} onBackup={doBackup} onRestore={() => fileRef.current?.click()} onClean={wipe} />}
         {route === "/showcase" && <div><div className="phead"><div><h1>Showcase</h1><p className="mt">All your finished renders, newest first.</p></div></div>
           {projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return rs.length ? <div key={p.id}><div className="sechead"><h2>{p.name}</h2><span className="badge">{rs.length}</span><button className="btn sm" onClick={() => go(`/p/${p.id}/studio`)}>Open project</button></div><Gallery renders={rs} onDelete={rmRender} /></div> : null; })}
           {!renders.length && <div className="empty">No renders yet.</div>}</div>}
@@ -211,6 +215,7 @@ export default function App() {
       </main>
       {over && <div className="overlay"><div><Icon d={IC.upload} size={46} /><h2>Drop to add project</h2><p>ZIP files only · the project type is detected automatically</p></div></div>}
       {msg && <div className="toast">{msg}</div>}
+      {palOpen && <Palette items={palItems} onClose={() => setPalOpen(false)} />}
       <ConfirmHost />
     </div>
   );

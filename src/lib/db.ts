@@ -1,7 +1,7 @@
 /* Projects/renders live in this browser's IndexedDB. On pages where IndexedDB is
    unavailable (some browsers block it for local file:// pages), the studio falls back
    to in-memory storage: everything works, but projects last only for the session. */
-export type ProjectRec = { id: string; name: string; size: number; created: number; opened: number; zip: Blob; entry?: string; comps?: string[]; kind?: string; detLabel?: string; thumb?: Blob };
+export type ProjectRec = { id: string; name: string; size: number; created: number; opened: number; zip: Blob; entry?: string; comps?: string[]; kind?: string; detLabel?: string; thumb?: Blob; hasKit?: boolean };
 export type RenderRec = {
   id: string; projectId: string; projectName: string; comp: string; name: string; createdAt: number; renderMs: number; size: number;
   mime: string; container: string; codec: string; width: number; height: number; fps: number; frames: number; settings: Record<string, unknown>; blob?: Blob; thumb?: Blob; savedTo?: string;

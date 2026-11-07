@@ -1,10 +1,13 @@
-import { useRef } from "react";
-import type { ProjectRec, RenderRec } from "../lib/db";
+import { useEffect, useRef } from "react";
+import { getProject, putProject, type ProjectRec, type RenderRec } from "../lib/db";
 import { fmtB, fmtD, useObjectUrl } from "../lib/util";
 import { Gallery } from "./Gallery";
 import { Icon, IC } from "./ui";
 import { fsaSupported } from "../lib/fsa";
 import { askConfirm } from "../lib/confirm";
+import { openZip } from "../lib/zip";
+import { loadProject } from "../lib/compile";
+import { makeProjectThumb } from "../lib/render";
 
 export const DropHero = ({ onFiles, busy, onFolder }: { onFiles: (f: File[]) => void; busy: string; onFolder: () => void }) => {
   const input = useRef<HTMLInputElement>(null);
@@ -19,10 +22,47 @@ export const DropHero = ({ onFiles, busy, onFolder }: { onFiles: (f: File[]) => 
     </div>
   );
 };
-const PCard = ({ p, count, last, onOpen, onDelete }: { p: ProjectRec; count: number; last?: RenderRec; onOpen: () => void; onDelete: () => void }) => {
+/* ---- lazy library posters --------------------------------------------------
+   A project card with no image at all gets a real poster: one frame of its
+   first composition, rendered in the background the first time the card
+   scrolls into view and stored on the project record — so it is generated
+   exactly once, ever, and later visits just read it back. Jobs run strictly
+   one at a time (each is a full project compile), so a library full of
+   cards becoming visible at once never stalls the page; a project whose
+   poster can't be made keeps the plain tile. */
+const posterTried = new Set<string>();
+let posterChain: Promise<void> = Promise.resolve();
+function enqueuePoster(id: string, onDone: () => void) {
+  if (posterTried.has(id)) return;
+  posterTried.add(id);
+  posterChain = posterChain.then(async () => {
+    try {
+      const rec = await getProject(id);
+      if (!rec || rec.thumb) return;
+      const o = await openZip(rec.zip);
+      const loaded = await loadProject(o.files, o.entry);
+      try {
+        const th = loaded.comps[0] ? await makeProjectThumb(loaded.comps[0]) : undefined;
+        if (th) { await putProject({ ...rec, thumb: th }); onDone(); }
+      } finally { loaded.revoke(); }
+    } catch { /* no poster — the plain tile stays */ }
+  });
+}
+
+const PCard = ({ p, count, last, onOpen, onDelete, onChanged }: { p: ProjectRec; count: number; last?: RenderRec; onOpen: () => void; onDelete: () => void; onChanged: () => void }) => {
   const th = useObjectUrl(last?.thumb || p.thumb, "p_" + p.id);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const wantPoster = !last?.thumb && !p.thumb && (p.kind === "remotion" || !p.kind);
+  useEffect(() => {
+    if (!wantPoster || !cardRef.current) return;
+    const io = new IntersectionObserver((es) => {
+      if (es.some((e) => e.isIntersecting)) { io.disconnect(); enqueuePoster(p.id, onChanged); }
+    }, { rootMargin: "240px" });
+    io.observe(cardRef.current);
+    return () => io.disconnect();
+  }, [wantPoster, p.id, onChanged]);
   return (
-    <div className="pc" onClick={onOpen}>
+    <div className="pc" ref={cardRef} onClick={onOpen}>
       <div className="pth" style={th ? { backgroundImage: `url(${th})` } : undefined}>{!th && <Icon d={IC.box} size={34} />}</div>
       <div className="pin"><div className="pn" title={p.name}>{p.name}</div><div className="mt">{fmtB(p.size)} · {fmtD(p.opened)}</div>
         <div className="pb"><span className="badge kind">{p.detLabel || "Remotion"}</span><span className="badge">{count} render{count === 1 ? "" : "s"}</span>{p.comps && <span className="badge">{p.comps.length} comp{p.comps.length === 1 ? "" : "s"}</span>}</div></div>
@@ -53,12 +93,12 @@ const LibraryBar = ({ used, quota, projects, renders, backupBusy, onBackup, onRe
   );
 };
 
-export const Home = ({ projects, renders, onFiles, onFolder, busy, onOpen, onDeleteProject, onDeleteRender, usage: use, backupBusy, onBackup, onRestore, onClean }: { projects: ProjectRec[]; renders: RenderRec[]; onFiles: (f: File[]) => void; onFolder: () => void; busy: string; onOpen: (id: string) => void; onDeleteProject: (id: string) => void; onDeleteRender: (id: string) => void; usage: { used: number; quota: number }; backupBusy: string; onBackup: () => void; onRestore: () => void; onClean: () => void }) => (
+export const Home = ({ projects, renders, onFiles, onFolder, busy, onOpen, onDeleteProject, onDeleteRender, usage: use, backupBusy, onBackup, onRestore, onClean, onChanged }: { projects: ProjectRec[]; renders: RenderRec[]; onFiles: (f: File[]) => void; onFolder: () => void; busy: string; onOpen: (id: string) => void; onDeleteProject: (id: string) => void; onDeleteRender: (id: string) => void; usage: { used: number; quota: number }; backupBusy: string; onBackup: () => void; onRestore: () => void; onClean: () => void; onChanged: () => void }) => (
   <div>
     <DropHero onFiles={onFiles} busy={busy} onFolder={onFolder} />
     <LibraryBar used={use.used} quota={use.quota} projects={projects.length} renders={renders.length} backupBusy={backupBusy} onBackup={onBackup} onRestore={onRestore} onClean={onClean} />
     {projects.length > 0 && <><div className="sechead"><h2>Projects</h2><span className="badge">{projects.length}</span></div>
-      <div className="plist">{projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return <PCard key={p.id} p={p} count={rs.length} last={rs[0]} onOpen={() => onOpen(p.id)} onDelete={() => { void askConfirm({ title: "Delete this project?", message: `Delete “${p.name}” and its ${rs.length} render(s)? The project and everything rendered from it will be removed from this browser.`, confirmLabel: "Delete project", danger: true }).then((ok) => { if (ok) onDeleteProject(p.id); }); }} />; })}</div></>}
+      <div className="plist">{projects.map((p) => { const rs = renders.filter((r) => r.projectId === p.id); return <PCard key={p.id} p={p} count={rs.length} last={rs[0]} onChanged={onChanged} onOpen={() => onOpen(p.id)} onDelete={() => { void askConfirm({ title: "Delete this project?", message: `Delete “${p.name}” and its ${rs.length} render(s)? The project and everything rendered from it will be removed from this browser.`, confirmLabel: "Delete project", danger: true }).then((ok) => { if (ok) onDeleteProject(p.id); }); }} />; })}</div></>}
     {renders.length > 0 && <><div className="sechead"><h2>Showcase</h2><span className="badge">{renders.length}</span></div><Gallery renders={renders.slice(0, 12)} showProject onDelete={onDeleteRender} /></>}
   </div>
 );

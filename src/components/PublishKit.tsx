@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import type { KitBox, PublishKit as Kit } from "../lib/publishkit";
+import { fmtKitDur, type KitBox, type PublishKit as Kit } from "../lib/publishkit";
 import { fmtB, useObjectUrl } from "../lib/util";
 import { Icon, IC } from "./ui";
 
@@ -55,10 +55,15 @@ function Box({ box }: { box: KitBox }) {
   );
 }
 
-export function PublishKitDrawer({ kit, onClose }: { kit: Kit; onClose: () => void }) {
+export function PublishKitDrawer({ kit, onClose, compIds, onRenderVersion }: { kit: Kit; onClose: () => void; compIds?: string[]; onRenderVersion?: (compositionId: string) => void }) {
   const [plat, setPlat] = useState(kit.platforms[0]?.id || "");
   useEffect(() => { const f = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", f); return () => window.removeEventListener("keydown", f); }, [onClose]);
   const cur = kit.platforms.find((p) => p.id === plat) || kit.platforms[0];
+  /* Kit v2 names one composition (and one duration) per platform — show
+     them for the active tab, with a shortcut that jumps straight to that
+     composition in the project view, ready to render. The shortcut hides
+     itself when the named composition isn't part of this project. */
+  const canRender = !!(cur?.composition && onRenderVersion && compIds?.includes(cur.composition));
   /* Portal to <body>: the project view's entrance animation leaves an
      identity transform on an ancestor, which would otherwise become the
      containing block for this fixed-position overlay and misplace it. */
@@ -70,6 +75,13 @@ export function PublishKitDrawer({ kit, onClose }: { kit: Kit; onClose: () => vo
           <button className="mx" style={{ position: "static" }} onClick={onClose} aria-label="Close">✕</button>
         </div>
         {kit.platforms.length > 1 && <div className="seg pktabs">{kit.platforms.map((p) => <button key={p.id} className={cur?.id === p.id ? "on" : ""} onClick={() => setPlat(p.id)}>{p.label}</button>)}</div>}
+        {cur && (cur.composition || cur.durationSec) && (
+          <div className="pkmeta">
+            {cur.composition && <span className="pkcomp" title="The composition to render for this platform">{cur.composition}</span>}
+            {cur.durationSec != null && <span className="pkdur">{fmtKitDur(cur.durationSec)}</span>}
+            {canRender && <button className="btn sm primary pkgo" onClick={() => onRenderVersion!(cur.composition!)}><Icon d={IC.play} size={14} /> Render this version</button>}
+          </div>
+        )}
         <div className="pklist">{cur?.boxes.map((b, i) => <Box key={i} box={b} />)}</div>
         <p className="hint pkfoot-note">Everything here lives inside this project’s ZIP — copy each field as you upload, and download the thumbnail on its own.</p>
       </aside>

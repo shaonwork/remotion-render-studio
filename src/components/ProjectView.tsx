@@ -20,6 +20,11 @@ type Job = { status: "idle" } | { status: "running" } | { status: "done"; ms: nu
    kept so the "Save to folder" button (a fresh user gesture, which is what
    the browser's permission prompt needs) can finish the job later. */
 type PendingSave = { blob: Blob; fileName: string; rec: RenderRec };
+/* "Render both platforms" queue: the publish kit's per-platform
+   compositions, rendered one after another with the current settings. */
+type QueueItem = { platform: string; label: string; compId: string };
+type QueueResult = { label: string; ok: boolean; info: string };
+type Queue = { items: QueueItem[]; idx: number; phase: "running" | "done" | "cancelled" | "partial"; results: QueueResult[] };
 
 const downloadBlob = (blob: Blob, name: string) => {
   const u = URL.createObjectURL(blob); const a = document.createElement("a");
@@ -86,11 +91,13 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const [st, setSt] = useState<St>({ status: "loading", msg: "Unpacking ZIP…" });
   const [renders, setRenders] = useState<RenderRec[]>([]);
   const [comp, setComp] = useState(0);
-  const [s, setS] = useState<Settings>(() => { try { const saved = localStorage.getItem("rs_set_" + id); return { ...defaultSettings(), ...(saved ? {} : loadPref() || {}), ...JSON.parse(saved || "{}") }; } catch { return defaultSettings(); } });
+  const [s, setS] = useState<Settings>(() => { try { const saved = localStorage.getItem("rs_set_" + id); const base = { ...defaultSettings(), ...(saved ? {} : loadPref() || {}), ...JSON.parse(saved || "{}") }; if (!saved) { const g = +(localStorage.getItem("rs_cache_mb") || 0); if (g > 0) base.mediaCacheMb = g; } return base; } catch { return defaultSettings(); } });
   const [outDir, setOutDir] = useState<Dir | null>(null);
   const [outPerm, setOutPerm] = useState<WritePerm | null>(null);
   const [pendingSave, setPendingSave] = useState<PendingSave | null>(null);
   const [kitOpen, setKitOpen] = useState(false);
+  const [queue, setQueue] = useState<Queue | null>(null);
+  const [jobFrames, setJobFrames] = useState(0);   // frame count of the render actually running (the queue may render a different comp than the selected one)
   useEffect(() => { loadOutDir().then((h) => { setOutDir(h || null); if (h) queryWrite(h).then(setOutPerm); }); }, []);
   const chooseOut = async () => {
     try { const h = await pickDir("render-out", "readwrite"); await saveOutDir(h); setOutDir(h); setOutPerm("granted"); toast("Output folder: " + h.name); }
@@ -120,14 +127,17 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const refresh = async () => setRenders(await listRenders(id));
   useEffect(() => {
     let dead = false, loaded: Loaded | undefined;
-    setSt({ status: "loading", msg: "Unpacking ZIP…" }); setJob({ status: "idle" }); setComp(0); setKitOpen(false); refresh();
+    setSt({ status: "loading", msg: "Unpacking ZIP…" }); setJob({ status: "idle" }); setComp(0); setKitOpen(false); setQueue(null); refresh();
     (async () => {
       try {
         const rec = await getProject(id); if (!rec) throw new Error("Project not found.");
         const o = await openZip(rec.zip); if (dead) return;
         setSt({ status: "loading", msg: "Compiling project in your browser…" });
         loaded = await loadProject(o.files, o.entry); if (dead) { loaded.revoke(); return; }
-        const upd = { ...rec, opened: Date.now(), entry: o.entry, comps: loaded.comps.map((c) => c.id) }; await putProject(upd);
+        /* hasKit is persisted on the record so the sidebar can offer its
+           Publish item while this project is open (the sidebar never sees
+           the project's files — only this view loads them). */
+        const upd = { ...rec, opened: Date.now(), entry: o.entry, comps: loaded.comps.map((c) => c.id), hasKit: !!findPublishKit(o.files) || undefined }; await putProject(upd);
         setSt({ status: "ready", loaded, files: o.files, rec: upd }); onChanged();
         if (!upd.thumb) {   // capture a library thumbnail from the first composition, quietly in the background
           const first = loaded.comps[0];
@@ -151,68 +161,163 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
   const frames = !c ? 0 : s.range === "test" ? Math.min(s.testFrames, c.durationInFrames!) : s.range === "custom" ? Math.max(1, Math.min(c.durationInFrames! - 1, s.to) - s.from + 1) : c.durationInFrames!;
   const up = (k: Partial<Settings>) => setS((x) => ({ ...x, ...k }));
 
-  const start = async () => {
-    if (!c || !st || st.status !== "ready") return;
-    if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // permission prompt must run inside the click gesture
+  /* Render ONE composition with the current settings and save it exactly
+     like a normal render (library record, folder copy, thumbnail). Shared
+     by the single Start button and the platform queue; it throws on
+     failure/abort so the caller decides the UI state. The finish signal
+     is the caller's choice — the queue fires it once, at the very end. */
+  const renderOne = async (cc: CompMeta, signalFinish: boolean): Promise<{ ms: number; size: number; where: string; warn?: string; folderMsg?: string; fileName: string }> => {
     const ctl = new AbortController(); ac.current = ctl; const t0 = Date.now();
     const cores = navigator.hardwareConcurrency || 0;
-    const od = outputDims(c.width!, c.height!, s.scale, s.codec);
-    const encMode = await probeEncoderMode(s.codec, od.width, od.height, s.hw, c.fps || 30, s.quality);
+    const od = outputDims(cc.width!, cc.height!, s.scale, s.codec);
+    const encMode = await probeEncoderMode(s.codec, od.width, od.height, s.hw, cc.fps || 30, s.quality);
     progressRef.current = { p: 0, rendered: 0, encoded: 0, eta: 0, t0, fps: 0, cores, mode: encMode };
-    setPendingSave(null);
-    setJob({ status: "running" });
+    const itemFrames = s.range === "test" ? Math.min(s.testFrames, cc.durationInFrames!) : s.range === "custom" ? Math.max(1, Math.min(cc.durationInFrames! - 1, s.to) - s.from + 1) : cc.durationInFrames!;
+    setJobFrames(itemFrames);
     const expectAudio = !s.muted && st.status === "ready" && Array.from(st.files.keys()).some((k) => /\.(mp3|wav|m4a|aac|ogg)$/i.test(k));
+    /* Render speed + ETA are MEASURED, not taken on faith: a rolling
+       ~2.5 s window over the renderer's own progress callbacks gives
+       frames-per-second, and the ETA is the frames left ÷ that speed
+       (falling back to the renderer's estimate until the window fills). */
+    const samples: { t: number; r: number }[] = [];
+    const res = await renderComposition(cc, s, ctl.signal, (p) => {
+      const now = performance.now();
+      samples.push({ t: now, r: p.rendered });
+      while (samples.length > 2 && now - samples[0].t > 2500) samples.shift();
+      const first = samples[0];
+      const fpsNow = samples.length > 1 && now > first.t ? (p.rendered - first.r) / ((now - first.t) / 1000) : 0;
+      const eta = fpsNow > 0.05 ? ((itemFrames - p.rendered) / fpsNow) * 1000 : p.etaMs;
+      progressRef.current = { p: p.progress * 100, rendered: p.rendered, encoded: p.encoded, eta, t0, fps: fpsNow, cores, mode: encMode };
+    }, expectAudio);
+    let warn = res.warnings.join(" ");
+    if (expectAudio && !(await outputHasAudio(res.blob))) warn = ("⚠ The finished file has NO audio track, although this project has sound. The browser media engine could not extract the audio — try the WebM format, or render with the downloadable kit / CLI, which handles audio natively. " + warn).trim();
+    const thumb = await makeThumb(res.blob), base = (s.filename || cc.id).replace(/[^\w.\- ]+/g, "_"), stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+    const fileName = `${base}-${stamp}.${s.container}`;
+    /* Folder save, told straight. Permission is re-checked NOW, at save
+       time (it can lapse between choosing the folder and a long render
+       finishing). Three honest outcomes: written to the folder; blocked —
+       in which case the file is downloaded instead, the reason stays in
+       the result area, and a button below can retry with a fresh click
+       (the gesture the permission prompt needs); or no folder chosen. */
+    let savedTo: string | undefined; let folderMsg: string | undefined; let folderBlocked = false;
+    if (outDir) {
+      const perm = await queryWrite(outDir); setOutPerm(perm);
+      if (perm === "granted") {
+        try { await writeToDir(outDir, fileName, res.blob); savedTo = `${outDir.name}/${fileName}`; }
+        catch (e: any) { folderBlocked = true; folderMsg = folderErrorText(e, outDir.name); if (isStaleDirError(e)) { await clearOutDir(); setOutDir(null); setOutPerm(null); } }
+      } else {
+        folderBlocked = true;
+        folderMsg = `The folder copy didn't happen — the browser hasn't given permission to write to “${outDir.name}”. Press “Save to folder” below to allow it and put the file there.`;
+      }
+    }
+    const rec: RenderRec = { id: uid(), projectId: id, projectName: st.status === "ready" ? st.rec.name : "", comp: cc.id, name: fileName, createdAt: Date.now(), renderMs: res.renderMs, size: res.blob.size, mime: res.blob.type,
+      container: s.container, codec: s.codec, width: od.width, height: od.height, fps: cc.fps!, frames: res.frames, settings: { ...s }, blob: s.keepCopy || !savedTo ? res.blob : undefined, thumb, savedTo };
+    await putRender(rec); await refresh(); onChanged();
+    if (folderBlocked) {
+      downloadBlob(res.blob, fileName);   // the file still reaches the user, via Downloads
+      if (outDir) setPendingSave({ blob: res.blob, fileName, rec });
+      folderMsg = (folderMsg || "The folder copy didn't happen.") + " A copy was downloaded instead, so you still have the file.";
+    }
+    if (signalFinish) signalRenderFinished(fileName);
+    return { ms: res.renderMs, size: res.blob.size, where: savedTo || "this browser", warn: warn || undefined, folderMsg, fileName };
+  };
+
+  const start = async () => {
+    if (!c || st.status !== "ready") return;
+    if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // permission prompt must run inside the click gesture
+    setPendingSave(null); setQueue(null); setJob({ status: "running" });
     try {
-      /* Render speed + ETA are MEASURED, not taken on faith: a rolling
-         ~2.5 s window over the renderer's own progress callbacks gives
-         frames-per-second, and the ETA is the frames left ÷ that speed
-         (falling back to the renderer's estimate until the window fills). */
-      const samples: { t: number; r: number }[] = [];
-      const res = await renderComposition(c, s, ctl.signal, (p) => {
-        const now = performance.now();
-        samples.push({ t: now, r: p.rendered });
-        while (samples.length > 2 && now - samples[0].t > 2500) samples.shift();
-        const first = samples[0];
-        const fpsNow = samples.length > 1 && now > first.t ? (p.rendered - first.r) / ((now - first.t) / 1000) : 0;
-        const eta = fpsNow > 0.05 ? ((frames - p.rendered) / fpsNow) * 1000 : p.etaMs;
-        progressRef.current = { p: p.progress * 100, rendered: p.rendered, encoded: p.encoded, eta, t0, fps: fpsNow, cores, mode: encMode };
-      }, expectAudio);
-      let warn = res.warnings.join(" ");
-      if (expectAudio && !(await outputHasAudio(res.blob))) warn = ("⚠ The finished file has NO audio track, although this project has sound. The browser media engine could not extract the audio — try the WebM format, or render with the downloadable kit / CLI, which handles audio natively. " + warn).trim();
-      const thumb = await makeThumb(res.blob), base = (s.filename || c.id).replace(/[^\w.\- ]+/g, "_"), stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
-      const fileName = `${base}-${stamp}.${s.container}`;
-      /* Folder save, told straight. Permission is re-checked NOW, at save
-         time (it can lapse between choosing the folder and a long render
-         finishing). Three honest outcomes: written to the folder; blocked —
-         in which case the file is downloaded instead, the reason stays in
-         the result area, and a button below can retry with a fresh click
-         (the gesture the permission prompt needs); or no folder chosen. */
-      let savedTo: string | undefined; let folderMsg: string | undefined; let folderBlocked = false;
-      if (outDir) {
-        const perm = await queryWrite(outDir); setOutPerm(perm);
-        if (perm === "granted") {
-          try { await writeToDir(outDir, fileName, res.blob); savedTo = `${outDir.name}/${fileName}`; }
-          catch (e: any) { folderBlocked = true; folderMsg = folderErrorText(e, outDir.name); if (isStaleDirError(e)) { await clearOutDir(); setOutDir(null); setOutPerm(null); } }
-        } else {
-          folderBlocked = true;
-          folderMsg = `The folder copy didn't happen — the browser hasn't given permission to write to “${outDir.name}”. Press “Save to folder” below to allow it and put the file there.`;
-        }
-      }
-      const rec: RenderRec = { id: uid(), projectId: id, projectName: st.rec.name, comp: c.id, name: fileName, createdAt: Date.now(), renderMs: res.renderMs, size: res.blob.size, mime: res.blob.type,
-        container: s.container, codec: s.codec, width: od.width, height: od.height, fps: c.fps!, frames: res.frames, settings: { ...s }, blob: s.keepCopy || !savedTo ? res.blob : undefined, thumb, savedTo };
-      await putRender(rec); await refresh(); onChanged();
-      if (folderBlocked) {
-        downloadBlob(res.blob, fileName);   // the file still reaches the user, via Downloads
-        if (outDir) setPendingSave({ blob: res.blob, fileName, rec });
-        folderMsg = (folderMsg || "The folder copy didn't happen.") + " A copy was downloaded instead, so you still have the file.";
-      }
-      setJob({ status: "done", ms: res.renderMs, size: res.blob.size, where: savedTo || "this browser", warn: warn || undefined, folderMsg });
-      signalRenderFinished(fileName);
-      toast(folderMsg ? "Render finished — the folder copy needs attention, see below" : warn ? "Render finished — with a warning, see below" : savedTo ? "Saved to " + savedTo : "Render saved to your library");
+      const r = await renderOne(c, true);
+      setJob({ status: "done", ms: r.ms, size: r.size, where: r.where, warn: r.warn, folderMsg: r.folderMsg });
+      toast(r.folderMsg ? "Render finished — the folder copy needs attention, see below" : r.warn ? "Render finished — with a warning, see below" : r.where !== "this browser" ? "Saved to " + r.where : "Render saved to your library");
     } catch (e: any) {
-      if (ctl.signal.aborted) setJob({ status: "cancelled" }); else setJob({ status: "error", err: String(e.message || e) });
+      if (ac.current?.signal.aborted) setJob({ status: "cancelled" }); else setJob({ status: "error", err: String(e.message || e) });
     }
   };
+
+  /* The queue's targets: the kit's platforms whose named composition is
+     actually in this project — Facebook first, then YouTube. Needs at
+     least two DISTINCT compositions, so a v1 kit (one shared render for
+     both platforms) never shows the button. */
+  const bothTargets: QueueItem[] = useMemo(() => {
+    if (!kit || !loaded) return [];
+    const items = kit.platforms
+      .filter((p) => p.composition && loaded.comps.some((x) => x.id === p.composition))
+      .map((p) => ({ platform: p.id, label: p.label, compId: p.composition! }));
+    if (new Set(items.map((i) => i.compId)).size < 2) return [];
+    const order = ["facebook", "youtube"];
+    return items.sort((a, b) => order.indexOf(a.platform) - order.indexOf(b.platform));
+  }, [kit, loaded]);
+
+  /* Render both platform versions back to back with the current settings.
+     Strictly sequential — the same pipeline (encode plan, fallback chain,
+     audio checks) one composition at a time. A failure is recorded and
+     the queue moves on; a cancel aborts the current render and stops the
+     queue. The finish chime/notification fires ONCE, at the very end. */
+  const startBoth = async () => {
+    if (!loaded || st.status !== "ready" || !bothTargets.length) return;
+    if (outDir) { const ok = await ensureWrite(outDir); setOutPerm(ok ? "granted" : "denied"); }   // same click-gesture rule as Start
+    setPendingSave(null);
+    const items = bothTargets;
+    setQueue({ items, idx: 0, phase: "running", results: [] });
+    setJob({ status: "running" });
+    const results: QueueResult[] = [];
+    let cancelled = false, folderNote = "";
+    for (let i = 0; i < items.length; i++) {
+      setQueue({ items, idx: i, phase: "running", results: [...results] });
+      const cc = loaded.comps.find((x) => x.id === items[i].compId);
+      if (!cc) { results.push({ label: items[i].label, ok: false, info: "Composition not found in this project" }); continue; }
+      setComp(loaded.comps.indexOf(cc));   // the preview follows the version being rendered
+      try {
+        const r = await renderOne(cc, false);
+        if (r.folderMsg) folderNote = r.folderMsg;
+        results.push({ label: items[i].label, ok: true, info: r.fileName });
+      } catch (e: any) {
+        if (ac.current?.signal.aborted) { cancelled = true; results.push({ label: items[i].label, ok: false, info: "Cancelled" }); break; }
+        results.push({ label: items[i].label, ok: false, info: String(e.message || e) });
+      }
+    }
+    const okCount = results.filter((r) => r.ok).length;
+    setJob({ status: "idle" });
+    if (cancelled) { setQueue({ items, idx: Math.max(0, results.length - 1), phase: "cancelled", results }); toast("Platform queue cancelled"); }
+    else if (okCount === items.length) {
+      signalRenderFinished(`${okCount} platform versions`);
+      setQueue({ items, idx: items.length - 1, phase: "done", results });
+      toast(folderNote ? "Both versions rendered — a folder copy needs attention, see the panel" : "Both platform versions rendered");
+    } else if (okCount > 0) {
+      signalRenderFinished(`${okCount} of ${items.length} platform versions`);
+      setQueue({ items, idx: items.length - 1, phase: "partial", results });
+      toast(`${okCount} of ${items.length} platform versions rendered — see the list in the panel`);
+    } else {
+      setQueue({ items, idx: items.length - 1, phase: "partial", results });
+      toast("Both platform renders failed — see the list in the panel");
+    }
+  };
+
+  /* Window-event commands from the sidebar and the Ctrl+K palette: open
+     the kit drawer, start a render, start the platform queue. The refs
+     always point at the latest closures, so one stable listener suffices,
+     and the guards make inapplicable commands harmless no-ops. */
+  const cmdRef = useRef({ start: () => {}, both: () => {}, canBoth: false, hasKit: false });
+  cmdRef.current = {
+    start: () => { if (job.status !== "running") void start(); },
+    both: () => { if (job.status !== "running") void startBoth(); },
+    canBoth: bothTargets.length > 0,
+    hasKit: !!kit,
+  };
+  useEffect(() => {
+    const openKit = () => setKitOpen(true);
+    const cmd = (e: Event) => {
+      const a = (e as CustomEvent).detail;
+      if (a === "start") cmdRef.current.start();
+      else if (a === "both" && cmdRef.current.canBoth) cmdRef.current.both();
+      else if (a === "kit" && cmdRef.current.hasKit) setKitOpen(true);
+    };
+    window.addEventListener("rs-open-kit", openKit);
+    window.addEventListener("rs-cmd", cmd);
+    return () => { window.removeEventListener("rs-open-kit", openKit); window.removeEventListener("rs-cmd", cmd); };
+  }, []);
+
   /* Retry the owed folder copy. This click IS the user gesture the
      browser's permission prompt requires, so it can succeed where the
      automatic post-render attempt (minutes after the last click) could not. */
@@ -246,7 +351,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
           {kit && <button className="btn" onClick={() => setKitOpen(true)}><Icon d={IC.upload} size={16} /> Publish kit</button>}
           <div className="tabs" style={{ marginLeft: 0 }}>{[["studio", "Studio"], ["renders", `Renders (${renders.length})`], ["files", "Files"]].map(([k, l]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}</div>
         </div></div>
-      {kit && kitOpen && <PublishKitDrawer kit={kit} onClose={() => setKitOpen(false)} />}
+      {kit && kitOpen && <PublishKitDrawer kit={kit} onClose={() => setKitOpen(false)} compIds={loaded?.comps.map((x) => x.id)} onRenderVersion={(cid) => { const i = loaded?.comps.findIndex((x) => x.id === cid) ?? -1; if (i >= 0) { setComp(i); setTab("studio"); } setKitOpen(false); }} />}
 
       {tab === "renders" && <div className="workscroll"><Gallery renders={renders} onDelete={async (rid) => { await deleteRender(rid); await refresh(); onChanged(); }} empty="Nothing rendered from this project yet. Head to the Studio tab and press Start render." /></div>}
 
@@ -295,7 +400,7 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>The compression flavour inside the file. The studio picks a good one for your format — change it only if a player refuses the result.</p>
                 <div className="row"><Field label="Encoder — graphics card or processor"><Seg value={s.hw} onChange={(v) => up({ hw: v })} options={[["no-preference", "Auto"], ["prefer-hardware", "GPU"], ["prefer-software", "CPU"]]} /></Field></div>
                 <p className="hint" style={{ margin: "-6px 0 12px" }}>GPU encoding is faster when your computer supports it. Auto lets the browser decide.</p>
-                <Switch on={s.hw === "prefer-hardware" && s.mediaCacheMb >= capMb} onChange={(v) => up(v ? { hw: "prefer-hardware", mediaCacheMb: capMb } : { hw: "no-preference", mediaCacheMb: 0 })} title="Turbo mode — full power" sub={`GPU-preferred encoding + the largest media cache for this computer's RAM (${mediaCacheLabel(capMb)} here). Drawing the frames themselves is single-threaded in the browser renderer; the core-count choice in the sidebar's System panel applies to HyperFrames kits.`} />
+                <Switch on={s.hw === "prefer-hardware" && s.mediaCacheMb >= capMb} onChange={(v) => up(v ? { hw: "prefer-hardware", mediaCacheMb: capMb } : { hw: "no-preference", mediaCacheMb: 0 })} title="Turbo mode — full power" sub={`GPU-preferred encoding + the largest media cache for this computer's RAM (${mediaCacheLabel(capMb)} here). Drawing the frames themselves is single-threaded in the browser renderer; the core-count choice on the Settings page applies to HyperFrames kits.`} />
                 {hasAudio && !s.muted && <><div className="row"><Field label="Sound format"><select value={s.audioCodec} onChange={(e) => up({ audioCodec: e.target.value as any })}><option value="auto">Auto (recommended)</option>{acodecs.map((x) => <option key={x} value={x}>{x.toUpperCase()}</option>)}</select></Field></div>
                   <div className="row"><Field label="Sound quality"><Seg value={s.audioBitrate} onChange={(v) => up({ audioBitrate: v })} options={[["auto", "Auto"], ["low", "Low"], ["medium", "Med"], ["high", "High"], ["very-high", "Max"]]} /></Field></div></>}
                 {(s.container === "webm" || s.container === "mkv") && <Switch on={s.transparent} onChange={(v) => up({ transparent: v })} title="Transparent background" sub="Keep the see-through (alpha) parts of the video — the web renderer supports this only for WebM / MKV with VP8 or VP9." />}
@@ -312,8 +417,30 @@ export function ProjectView({ id, tab, setTab, onChanged, toast }: { id: string;
             </div>
             <div className="panelfoot">
               <button className={"btn big " + (running ? "stop" : "primary")} onClick={running ? () => ac.current?.abort() : start}>{running ? "Cancel render" : "Start render"}</button>
-              {job.status === "running" && <ProgressPanel pref={progressRef} frames={frames} />}
-              {job.status === "done" && <div className="result"><b>✓ Done in {fmtT(job.ms)}</b><div className="hint" style={{ color: "var(--text)" }}>{fmtB(job.size)} · saved in {job.where}</div>{job.warn && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.warn}</div>}{job.folderMsg && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.folderMsg}</div>}<button className="btn sm" style={{ marginTop: 10 }} onClick={() => setTab("renders")}>Open renders</button>{pendingSave && outDir && <button className="btn sm" style={{ marginTop: 10, marginLeft: 8 }} onClick={savePendingToFolder}>Save to “{outDir.name}”</button>}</div>}
+              {!running && bothTargets.length > 0 && (
+                <button className="btn big queuebtn" onClick={startBoth} title="Render the Facebook version, then the YouTube version, one after the other with these settings">
+                  Render both platforms — {bothTargets.map((t) => t.label).join(" + ")}
+                </button>
+              )}
+              {job.status === "running" && queue?.phase === "running" ? (
+                <div className="qbox">
+                  <div className="qhead"><span className="pulse" /><b>Rendering {queue.items[queue.idx].label} version · {queue.idx + 1} of {queue.items.length}</b></div>
+                  <ProgressPanel pref={progressRef} frames={jobFrames || frames} />
+                  {queue.results.length > 0 && <div className="qlist">{queue.results.map((r, i) => <div key={i} className="qitem">{r.ok ? "✓" : "✗"} {r.label} — <span>{r.info}</span></div>)}</div>}
+                </div>
+              ) : job.status === "running" && <ProgressPanel pref={progressRef} frames={jobFrames || frames} />}
+              {queue && queue.phase !== "running" && job.status !== "running" && (
+                <div className={"result" + (queue.phase === "partial" ? " err" : "")}>
+                  <b>{queue.phase === "done" ? "✓ Both platform versions rendered" : queue.phase === "cancelled" ? "Platform queue cancelled" : "Platform queue finished — with problems"}</b>
+                  <div className="qlist">{queue.results.map((r, i) => <div key={i} className="qitem">{r.ok ? "✓" : "✗"} {r.label} — <span>{r.info}</span></div>)}</div>
+                  <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className="btn sm" onClick={() => setTab("renders")}>Open renders</button>
+                    {kit && <button className="btn sm" onClick={() => setKitOpen(true)}>Open Publish kit</button>}
+                    {pendingSave && outDir && <button className="btn sm" onClick={savePendingToFolder}>Save to “{outDir.name}”</button>}
+                  </div>
+                </div>
+              )}
+              {job.status === "done" && <div className="result"><b>✓ Done in {fmtT(job.ms)}</b><div className="hint" style={{ color: "var(--text)" }}>{fmtB(job.size)} · saved in {job.where}</div>{job.warn && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.warn}</div>}{job.folderMsg && <div className="hint" style={{ color: "var(--warn)", fontWeight: 600 }}>{job.folderMsg}</div>}<button className="btn sm" style={{ marginTop: 10 }} onClick={() => setTab("renders")}>Open renders</button>{kit && <button className="btn sm" style={{ marginTop: 10, marginLeft: 8 }} onClick={() => setKitOpen(true)}>Open Publish kit</button>}{pendingSave && outDir && <button className="btn sm" style={{ marginTop: 10, marginLeft: 8 }} onClick={savePendingToFolder}>Save to “{outDir.name}”</button>}</div>}
               {job.status === "cancelled" && <div className="result err"><b>Render cancelled</b></div>}
               {job.status === "error" && <div className="result err"><b>Render failed</b><pre>{job.err}</pre></div>}
             </div>
