@@ -52,7 +52,7 @@ export async function loadProject(files: Files, entry: string): Promise<Loaded> 
         }
         if (HOST_NAMES.has(a.path)) return { path: a.path, external: true };
         const pkg = a.path.startsWith("@") ? a.path.split("/").slice(0, 2).join("/") : a.path.split("/")[0];
-        return { errors: [{ text: `The package “${a.path}” isn’t available in the browser build yet (${pkg}). Supported: remotion, react, @remotion/transitions, shapes, paths, noise, layout-utils, zod.` }] };
+        return { errors: [{ text: `The package “${a.path}” isn’t available in the browser build yet (${pkg}). Supported: remotion, react, @remotion/transitions, shapes, paths, noise, layout-utils, lottie, zod.` }] };
       });
       b.onLoad({ filter: /.*/, namespace: "vfs" }, (a) => {
         const data = files.get(a.path)!, e = ext(a.path);

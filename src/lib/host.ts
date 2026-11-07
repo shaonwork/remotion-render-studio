@@ -16,6 +16,7 @@ import * as Noise from "@remotion/noise";
 import * as Layout from "@remotion/layout-utils";
 import * as Zod from "zod";
 import * as Media from "@remotion/media";
+import * as LottiePkg from "@remotion/lottie";
 
 export type CompMeta = { id: string; component: any; width?: number; height?: number; fps?: number; durationInFrames?: number; defaultProps?: any; calculateMetadata?: any; still?: boolean };
 export type Ctx = { root: any; comps: CompMeta[]; url: (p: string) => string; missing: Set<string> };
@@ -46,7 +47,7 @@ export const makeHost = (ctx: Ctx): Record<string, any> => {
     remotion,
     "@remotion/transitions": Transitions, "@remotion/transitions/fade": Fade, "@remotion/transitions/slide": Slide, "@remotion/transitions/wipe": Wipe,
     "@remotion/transitions/flip": Flip, "@remotion/transitions/clock-wipe": ClockWipe,
-    "@remotion/media": Media, "@remotion/shapes": Shapes, "@remotion/paths": Paths, "@remotion/noise": Noise, "@remotion/layout-utils": Layout, zod: Zod, "zod/v4": Zod,
+    "@remotion/media": Media, "@remotion/shapes": Shapes, "@remotion/paths": Paths, "@remotion/noise": Noise, "@remotion/layout-utils": Layout, "@remotion/lottie": LottiePkg, zod: Zod, "zod/v4": Zod,
   };
 };
 export const HOST_NAMES = new Set(Object.keys(makeHost({ root: null, comps: [], url: (p) => p, missing: new Set() })));
